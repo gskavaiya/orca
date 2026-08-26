@@ -207,6 +207,22 @@ async function setAgentHooksEnabled(
 
 export const AGENT_HOOK_HANDLERS: Record<string, CommandHandler> = {
   'agent hooks prepare-codex': async ({ client }) => {
+    if (process.env.WSL_DISTRO_NAME?.trim()) {
+      try {
+        await client.call(
+          'agentHooks.prepareCodexForWslPane',
+          {
+            codexHome: process.env.CODEX_HOME ?? '',
+            orcaCodexHome: process.env.ORCA_CODEX_HOME ?? '',
+            wslDistro: process.env.WSL_DISTRO_NAME
+          },
+          { timeoutMs: 10_000 }
+        )
+      } catch {
+        // Best effort: old or unavailable runtimes must not block Codex launch.
+      }
+      return
+    }
     const settings = await readHookSettings(client)
     await prepareManagedCodexHomeBeforeShellLaunch({
       userDataPath: getDefaultUserDataPath(),

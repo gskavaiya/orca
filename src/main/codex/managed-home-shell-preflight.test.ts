@@ -4,7 +4,9 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   prepareManagedCodexHomeBeforeShellLaunch,
-  resolveManagedCodexShellPreflightHome
+  prepareManagedWslCodexHomeBeforeShellLaunch,
+  resolveManagedCodexShellPreflightHome,
+  resolveManagedWslCodexShellPreflightTarget
 } from './managed-home-shell-preflight'
 
 const roots: string[] = []
@@ -158,5 +160,86 @@ describe('managed Codex shell preflight', () => {
         userDataPath
       )
     ).toBeNull()
+  })
+})
+
+describe('managed WSL Codex shell preflight', () => {
+  const home = '/home/jin/.local/share/orca/codex-runtime-home/home'
+  const env = {
+    CODEX_HOME: home,
+    ORCA_CODEX_HOME: home,
+    WSL_DISTRO_NAME: 'Ubuntu-24.04'
+  }
+
+  it('targets the pane-selected managed home through its UNC twin', () => {
+    expect(resolveManagedWslCodexShellPreflightTarget(env)).toEqual({
+      runtimeHomePath:
+        '\\\\wsl.localhost\\Ubuntu-24.04\\home\\jin\\.local\\share\\orca\\codex-runtime-home\\home',
+      wslDistro: 'Ubuntu-24.04'
+    })
+  })
+
+  it('installs once through the WSL runtime-home lane while hooks are enabled', () => {
+    const status = {
+      agent: 'codex' as const,
+      state: 'installed' as const,
+      configPath: 'config.toml',
+      managedHooksPresent: true,
+      detail: null
+    }
+    const install = vi.fn(() => status)
+
+    expect(prepareManagedWslCodexHomeBeforeShellLaunch({ env, hooksEnabled: true, install })).toBe(
+      status
+    )
+    expect(install).toHaveBeenCalledExactlyOnceWith(
+      '\\\\wsl.localhost\\Ubuntu-24.04\\home\\jin\\.local\\share\\orca\\codex-runtime-home\\home',
+      { runtime: 'wsl', wslDistro: 'Ubuntu-24.04' }
+    )
+
+    expect(
+      prepareManagedWslCodexHomeBeforeShellLaunch({ env, hooksEnabled: false, install })
+    ).toBeNull()
+    expect(install).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    [
+      'a user home',
+      { ...env, CODEX_HOME: '/home/jin/.codex', ORCA_CODEX_HOME: '/home/jin/.codex' }
+    ],
+    ['unequal routing markers', { ...env, ORCA_CODEX_HOME: `${home}-other` }],
+    [
+      'a parent traversal',
+      {
+        ...env,
+        CODEX_HOME: `/home/jin/../jin${home.slice('/home/jin'.length)}`,
+        ORCA_CODEX_HOME: `/home/jin/../jin${home.slice('/home/jin'.length)}`
+      }
+    ],
+    [
+      'a dot segment',
+      {
+        ...env,
+        CODEX_HOME: `/home/./jin${home.slice('/home/jin'.length)}`,
+        ORCA_CODEX_HOME: `/home/./jin${home.slice('/home/jin'.length)}`
+      }
+    ],
+    [
+      'a host path',
+      { ...env, CODEX_HOME: 'C:\\Users\\jin\\.codex', ORCA_CODEX_HOME: 'C:\\Users\\jin\\.codex' }
+    ],
+    ['a missing distro', { ...env, WSL_DISTRO_NAME: '' }],
+    ['a distro path escape', { ...env, WSL_DISTRO_NAME: 'Ubuntu\\..\\host' }],
+    [
+      'a repeated separator',
+      {
+        ...env,
+        CODEX_HOME: home.replace('/jin/', '/jin//'),
+        ORCA_CODEX_HOME: home.replace('/jin/', '/jin//')
+      }
+    ]
+  ])('rejects %s', (_label, candidate) => {
+    expect(resolveManagedWslCodexShellPreflightTarget(candidate)).toBeNull()
   })
 })

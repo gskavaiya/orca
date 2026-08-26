@@ -2,11 +2,20 @@ import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import { join, relative, resolve, sep } from 'node:path'
 import type { AgentHookInstallStatus } from '../../shared/agent-hook-types'
 import { normalizeRuntimePathForComparison } from '../../shared/cross-platform-path'
+import { toWindowsWslPath } from '../../shared/wsl-paths'
+import { wslCodexRuntimeHomeForGuestHome } from '../pty/codex-home-wsl-env'
+import type { CodexWslRuntimeHookTarget } from './codex-wsl-hook-install-plan'
 import { codexHookService } from './hook-service'
 
 type ShellPreflightEnvironment = {
   CODEX_HOME?: string
   ORCA_CODEX_HOME?: string
+  WSL_DISTRO_NAME?: string
+}
+
+export type ManagedWslCodexShellPreflightTarget = {
+  runtimeHomePath: string
+  wslDistro: string
 }
 
 function pathsEqual(left: string, right: string): boolean {
@@ -103,4 +112,68 @@ export async function prepareManagedCodexHomeBeforeShellLaunch(args: {
     return null
   }
   return (args.install ?? ((home) => codexHookService.install(home)))(runtimeHomePath)
+}
+
+function isAbsolutePosixPathWithoutDotSegments(path: string): boolean {
+  const segments = path.split('/').slice(1)
+  return (
+    path.startsWith('/') &&
+    !path.startsWith('//') &&
+    !path.includes('\\') &&
+    segments.every((segment) => segment && segment !== '.' && segment !== '..')
+  )
+}
+
+export function resolveManagedWslCodexShellPreflightTarget(
+  env: ShellPreflightEnvironment
+): ManagedWslCodexShellPreflightTarget | null {
+  const codexHome = env.CODEX_HOME?.trim()
+  const orcaCodexHome = env.ORCA_CODEX_HOME?.trim()
+  const wslDistro = env.WSL_DISTRO_NAME?.trim()
+  if (
+    !codexHome ||
+    codexHome !== orcaCodexHome ||
+    !wslDistro ||
+    /[\\/\r\n]/.test(wslDistro) ||
+    !isAbsolutePosixPathWithoutDotSegments(codexHome)
+  ) {
+    return null
+  }
+
+  const runtimeHomeSuffix = wslCodexRuntimeHomeForGuestHome('')
+  if (!codexHome.endsWith(runtimeHomeSuffix)) {
+    return null
+  }
+  const guestHome = codexHome.slice(0, -runtimeHomeSuffix.length)
+  if (
+    !guestHome ||
+    !isAbsolutePosixPathWithoutDotSegments(guestHome) ||
+    wslCodexRuntimeHomeForGuestHome(guestHome) !== codexHome
+  ) {
+    return null
+  }
+
+  return { runtimeHomePath: toWindowsWslPath(codexHome, wslDistro), wslDistro }
+}
+
+export function prepareManagedWslCodexHomeBeforeShellLaunch(args: {
+  env: ShellPreflightEnvironment
+  hooksEnabled: boolean
+  install?: (
+    runtimeHomePath: string,
+    target: CodexWslRuntimeHookTarget
+  ) => AgentHookInstallStatus | null
+}): AgentHookInstallStatus | null {
+  if (!args.hooksEnabled) {
+    return null
+  }
+  const target = resolveManagedWslCodexShellPreflightTarget(args.env)
+  if (!target) {
+    return null
+  }
+  const install =
+    args.install ??
+    ((home: string, hookTarget: CodexWslRuntimeHookTarget) =>
+      codexHookService.installForRuntimeHome(home, hookTarget))
+  return install(target.runtimeHomePath, { runtime: 'wsl', wslDistro: target.wslDistro })
 }
