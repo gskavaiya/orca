@@ -391,9 +391,6 @@ describe('Codex shell launch preflight command', () => {
     const launcherPath = join(resourcesPath, 'bin', 'orca')
     if (config.create === 'directory') {
       mkdirSync(launcherPath)
-    } else if (config.create !== null) {
-      writeFileSync(launcherPath, '#!/bin/sh\nexit 0\n')
-      chmodSync(launcherPath, config.create)
     }
 
     expect(
