@@ -54,6 +54,7 @@
     "../src/main/codex/codex-user-hook-trust-rebase-client.ts",
     "../src/main/codex/codex-user-hook-trust-rebase.ts",
     "../src/main/codex/codex-wsl-hook-install-plan.ts",
+    "../src/main/pty/codex-home-wsl-env.ts",
     "../src/main/codex/config-settings-baseline.ts",
     "../src/main/codex/config-settings-conflict-resolution.ts",
     "../src/main/codex/config-settings-promotion.ts",
