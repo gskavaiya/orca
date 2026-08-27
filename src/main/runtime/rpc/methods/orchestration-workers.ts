@@ -1,16 +1,13 @@
 import type { TuiAgent } from '../../../../shared/tui-agent'
-import { buildDispatchPreamble } from '../../orchestration/preamble'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
 import { defineMethod, type RpcMethod } from '../core'
 import { startFederatedWorker } from './orchestration-federated-worker-start'
-import { assertOrchestrationWorktreeCreationSupported } from './orchestration-folder-worktree-placement'
 import { WorkerStartParams } from './orchestration-worker-start-schema'
 import {
   createExistingWorktreeWorkerTerminal,
   createWorkerWorktree,
   monitorWorkerSetup,
   requireWorkerAuthority,
-  type WorkerEffect,
   type WorkerSetupReceipt
 } from './orchestration-worker-topology'
 import {
@@ -22,6 +19,18 @@ import { failWorkerStartWithReceipt } from './orchestration-worker-start-receipt
 import { prepareLocalWorkerStart } from './orchestration-worker-start-validation'
 import { resolveDispatchCreator } from './orchestration-dispatch-creator'
 import { resolveOrchestrationCaller } from './orchestration-run-scope'
+import {
+  consumeWorkerAuthorityCapability,
+  createWorkerAuthorityLaunch,
+  monitorWorkerAuthorityLifecycle,
+  persistWorkerAuthorityAttestation
+} from './orchestration-worker-authority-launch'
+import {
+  buildInitialWorkerPlacementReceipt,
+  buildWorkerStartOptions,
+  sendWorkerDispatchInput
+} from './orchestration-worker-start-record'
+import { resolveLocalWorkerPlacement } from './orchestration-worker-placement-resolution'
 
 export const ORCHESTRATION_WORKER_START_METHODS: RpcMethod[] = [
   defineMethod({
@@ -53,7 +62,20 @@ export const ORCHESTRATION_WORKER_START_METHODS: RpcMethod[] = [
         )
       }
 
+      if (Boolean(params.policy) !== Boolean(params.capabilityRef)) {
+        throw new OrchestrationError(
+          'worker_authority_capability_stale',
+          'worker-start requires --policy and --capability-ref together.'
+        )
+      }
+
       if (params.on) {
+        if (params.policy) {
+          throw new OrchestrationError(
+            'worker_authority_policy_unsupported',
+            'Federated workers do not yet support NO_GITHUB_AUTHORITY.'
+          )
+        }
         return startFederatedWorker({
           params,
           runtime,
@@ -69,56 +91,32 @@ export const ORCHESTRATION_WORKER_START_METHODS: RpcMethod[] = [
         requestedWorktree === 'new-child' || requestedWorktree === 'new-top-level'
       const { agent, launch } = prepareLocalWorkerStart({ params, createsWorktree, runtime })
 
-      const coordinatorTerminal = await runtime.showTerminal(params.from)
-      const creationWorktree = createsWorktree
-        ? await runtime.showManagedWorktree(`id:${coordinatorTerminal.worktreeId}`)
-        : undefined
-      if (creationWorktree) {
-        await assertOrchestrationWorktreeCreationSupported({
-          runtime,
-          repoSelector: params.repo ?? creationWorktree.repoId,
-          existingPlacement: 'current or an exact existing folder workspace'
-        })
-      }
-      let resolvedWorktree = creationWorktree
-        ? undefined
-        : requestedWorktree === 'current'
-          ? await runtime.showManagedTerminalWorkspace(`id:${coordinatorTerminal.worktreeId}`)
-          : await runtime.showManagedTerminalWorkspace(requestedWorktree)
-      let explicitTerminal
-      if (params.terminal) {
-        explicitTerminal = await runtime.showTerminal(params.terminal)
-        if (explicitTerminal.worktreeId !== resolvedWorktree?.id) {
-          throw new OrchestrationError(
-            'terminal_worktree_mismatch',
-            `Terminal ${params.terminal} does not belong to worktree ${resolvedWorktree?.id}.`
-          )
-        }
-        if (!(await runtime.isTerminalRunningAgent(params.terminal))) {
-          throw new OrchestrationError(
-            'agent_unconfigured',
-            `Terminal ${params.terminal} is not running a recognized agent.`
-          )
-        }
-      }
+      const placementResolution = await resolveLocalWorkerPlacement({
+        params,
+        runtime,
+        requestedWorktree,
+        createsWorktree
+      })
+      const creationWorktree = placementResolution.creationWorktree
+      let resolvedWorktree = placementResolution.resolvedWorktree
 
-      const startOptions = {
-        worktree: requestedWorktree,
-        resolvedWorktreeId: resolvedWorktree?.id ?? null,
-        name: params.name ?? null,
-        repo: params.repo ?? creationWorktree?.repoId ?? null,
-        baseBranch: params.baseBranch ?? null,
-        terminal: params.terminal ?? null,
-        agent: agent ?? null,
-        launch: launch.receipt,
-        timeoutMs: params.timeoutMs ?? 60_000,
-        setup: createsWorktree ? (params.setup ?? 'run') : 'not_applicable',
-        setupSource: createsWorktree
-          ? params.setup
-            ? 'explicit_request'
-            : 'orchestration_default'
-          : 'existing_worktree'
-      }
+      const authorityCapability = consumeWorkerAuthorityCapability({
+        params,
+        runtime,
+        agent,
+        createsWorktree,
+        resolvedWorktreeId: resolvedWorktree?.id
+      })
+      const startOptions = buildWorkerStartOptions({
+        params,
+        requestedWorktree,
+        resolvedWorktreeId: resolvedWorktree?.id,
+        creationRepoId: creationWorktree?.repoId,
+        createsWorktree,
+        agent,
+        launchReceipt: launch.receipt,
+        authorityCapability
+      })
       const started = db.createStartingWorkerDispatch({
         creator: resolveDispatchCreator(runtime, params.from),
         maxDepth: runtime.getNestedWorkerMaxDepth(),
@@ -128,25 +126,24 @@ export const ORCHESTRATION_WORKER_START_METHODS: RpcMethod[] = [
         runtimeEpoch: runtime.getRuntimeId(),
         mutationReceipt: orchestrationMutation
       })
-      const effects: WorkerEffect[] = []
-      if (resolvedWorktree) {
-        effects.push(
-          { kind: 'worktree', action: 'reused', id: resolvedWorktree.id },
-          { kind: 'setup', action: 'not_applicable', state: 'not_applicable' }
-        )
-      }
+      const placement = buildInitialWorkerPlacementReceipt({
+        resolvedWorktreeId: resolvedWorktree?.id,
+        authorityPolicyRequested: Boolean(params.policy)
+      })
+      const effects = placement.effects
       let terminalHandle = params.terminal
       let terminalRevealWarning: string | undefined
       let failedStage = 'terminal_create'
-      let setupReceipt: WorkerSetupReceipt = {
-        requested: 'not_applicable',
-        effective: 'not_applicable',
-        source: 'existing_worktree',
-        hookFound: false,
-        startupPolicy: 'start-immediately',
-        state: 'not_applicable'
-      }
+      let setupReceipt: WorkerSetupReceipt = placement.setupReceipt
+      let authorityIsolation
+      let authorityLifecycle
       try {
+        ;({ isolation: authorityIsolation, lifecycle: authorityLifecycle } =
+          createWorkerAuthorityLaunch({
+            capability: authorityCapability,
+            dispatchId: started.dispatch.id,
+            worktreeId: resolvedWorktree?.id
+          }))
         if (creationWorktree) {
           failedStage = 'worktree_create'
           const created = await createWorkerWorktree({
@@ -176,7 +173,8 @@ export const ORCHESTRATION_WORKER_START_METHODS: RpcMethod[] = [
             agent: agent as TuiAgent,
             launchPreferences: launch.preferences,
             taskId: task.id,
-            effects
+            effects,
+            authorityIsolation
           })
           terminalHandle = terminal.handle
           terminalRevealWarning = terminal.warning
@@ -222,6 +220,20 @@ export const ORCHESTRATION_WORKER_START_METHODS: RpcMethod[] = [
           )
         }
         const terminalAuthority = requireWorkerAuthority(runtime, terminalHandle)
+        if (authorityIsolation) {
+          failedStage = 'authority_attestation'
+        }
+        const authorityAttestation = await persistWorkerAuthorityAttestation({
+          isolation: authorityIsolation,
+          runtime,
+          db,
+          runId: run.id,
+          taskId: task.id,
+          dispatchId: started.dispatch.id,
+          terminalHandle,
+          agent: agent as TuiAgent,
+          processIncarnation: terminalAuthority.processIncarnation
+        })
         const capability = db.prepareStartingWorkerAuthority({
           dispatchId: started.dispatch.id,
           handle: terminalHandle,
@@ -233,25 +245,29 @@ export const ORCHESTRATION_WORKER_START_METHODS: RpcMethod[] = [
         })
 
         failedStage = 'dispatch_input'
-        const preamble = buildDispatchPreamble({
-          canDispatchSubWorkers: started.dispatch.depth < runtime.getNestedWorkerMaxDepth(),
+        await sendWorkerDispatchInput({
+          runtime,
+          terminalHandle,
           taskId: task.id,
           dispatchId: started.dispatch.id,
           taskSpec: task.spec,
           coordinatorHandle: params.from,
-          workerHandle: terminalHandle,
           dispatchCapability: capability,
+          depth: started.dispatch.depth,
           devMode: params.devMode,
-          cliCommand: runtime.getTerminalOrchestrationCliCommand(terminalHandle)
-        })
-        await runtime.sendTerminalAgentPrompt(terminalHandle, preamble)
-        effects.push({
-          kind: 'dispatch_input',
-          role: 'agent',
-          id: terminalHandle,
-          state: 'accepted'
+          isolated: Boolean(authorityIsolation),
+          effects
         })
         const worker = db.markWorkerDispatchReady(started.dispatch.id, effects)
+        monitorWorkerAuthorityLifecycle({
+          lifecycle: authorityLifecycle,
+          db,
+          runtime,
+          runId: run.id,
+          taskId: task.id,
+          dispatchId: started.dispatch.id,
+          terminalHandle
+        })
         monitorWorkerSetup({
           runtime,
           db,
@@ -271,6 +287,7 @@ export const ORCHESTRATION_WORKER_START_METHODS: RpcMethod[] = [
           timeoutMs: params.timeoutMs ?? 60_000,
           effects,
           residualResources: [],
+          ...(authorityAttestation ? { authorityIsolation: authorityAttestation } : {}),
           ...(terminalRevealWarning ? { warning: terminalRevealWarning } : {})
         }
       } catch (error) {

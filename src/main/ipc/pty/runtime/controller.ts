@@ -2,6 +2,7 @@ import { makePaneKey } from '../../../../shared/stable-pane-id'
 import { claimRuntimePaneCreate, makePaneSpawnReservationKey } from '../pane/spawn-reservation'
 import type { PtyRuntimeControllerDeps } from './controller-deps'
 import { spawnPtyFromRuntimeController } from './spawn'
+import { getLocalPtyProvider } from '../provider/registry'
 import {
   killPtyFromRuntimeController,
   markReversibleStopsFromRuntimeController,
@@ -34,6 +35,8 @@ export function installPtyRuntimeController(deps: PtyRuntimeControllerDeps): voi
   const { runtime, adoptStablePane, requestSerializedBuffer } = deps
 
   runtime?.setPtyController({
+    supportsWorkerAuthorityIsolation: (agent) =>
+      getLocalPtyProvider().supportsWorkerAuthorityIsolation?.(agent) === true,
     claimStablePaneCreate: (args) => {
       const paneKey = makePaneKey(args.tabId, args.leafId)
       const ownerKey = makePaneSpawnReservationKey(args.worktreeId, args.connectionId, paneKey)

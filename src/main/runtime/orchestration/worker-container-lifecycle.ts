@@ -1,0 +1,227 @@
+import { createHash } from 'node:crypto'
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import type { OrchestrationDb } from './db'
+import { reconcileLifecycleMessage } from './lifecycle-reconciliation'
+
+const LIFECYCLE_SCHEMA_VERSION = 'worker_lifecycle_receipt/1'
+const MAX_LIFECYCLE_RECEIPT_BYTES = 66 * 1024
+const LIFECYCLE_POLL_MS = 250
+const LIFECYCLE_MONITOR_MS = 24 * 60 * 60 * 1_000
+
+export type WorkerContainerLifecycleBoundary = {
+  directory: string
+  binding: `sha256:${string}`
+}
+
+type WorkerContainerLifecycleReceipt = {
+  schemaVersion: typeof LIFECYCLE_SCHEMA_VERSION
+  dispatchId: string
+  lifecycleBinding: string
+  type: 'worker_done' | 'escalation'
+  subject: string
+  body: string
+  outcome?: 'succeeded' | 'failed'
+}
+
+export function createWorkerContainerLifecycleBoundary(args: {
+  dispatchId: string
+  capabilityRef: string
+}): WorkerContainerLifecycleBoundary {
+  if (!/^[a-zA-Z][a-zA-Z0-9_-]{0,127}$/.test(args.dispatchId)) {
+    throw new Error('worker_authority_isolation_failed')
+  }
+  const requestedRoot = join(tmpdir(), 'orca-worker-lifecycle-v1')
+  mkdirSync(requestedRoot, { recursive: true, mode: 0o700 })
+  const root = realpathSync(requestedRoot)
+  const directory = join(root, args.dispatchId)
+  mkdirSync(directory, { recursive: true, mode: 0o700 })
+  if (realpathSync(directory) !== directory || lstatSync(directory).isSymbolicLink()) {
+    throw new Error('worker_authority_isolation_failed')
+  }
+  const binding = `sha256:${createHash('sha256')
+    .update(`${args.capabilityRef}\n${args.dispatchId}`)
+    .digest('hex')}` as const
+  return { directory, binding }
+}
+
+function parseReceipt(path: string): WorkerContainerLifecycleReceipt {
+  const stat = lstatSync(path)
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_LIFECYCLE_RECEIPT_BYTES) {
+    throw new Error('worker_lifecycle_receipt_invalid')
+  }
+  const value: unknown = JSON.parse(readFileSync(path, 'utf8'))
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('worker_lifecycle_receipt_invalid')
+  }
+  const receipt = value as Partial<WorkerContainerLifecycleReceipt>
+  if (
+    receipt.schemaVersion !== LIFECYCLE_SCHEMA_VERSION ||
+    typeof receipt.dispatchId !== 'string' ||
+    typeof receipt.lifecycleBinding !== 'string' ||
+    (receipt.type !== 'worker_done' && receipt.type !== 'escalation') ||
+    typeof receipt.subject !== 'string' ||
+    receipt.subject.length === 0 ||
+    Buffer.byteLength(receipt.subject) > 512 ||
+    typeof receipt.body !== 'string' ||
+    Buffer.byteLength(receipt.body) > 64 * 1024 ||
+    (receipt.type === 'worker_done' &&
+      receipt.outcome !== 'succeeded' &&
+      receipt.outcome !== 'failed') ||
+    (receipt.type === 'escalation' && receipt.outcome !== undefined)
+  ) {
+    throw new Error('worker_lifecycle_receipt_invalid')
+  }
+  return receipt as WorkerContainerLifecycleReceipt
+}
+
+export function admitWorkerContainerLifecycleReceipt(args: {
+  db: OrchestrationDb
+  runId: string
+  taskId: string
+  dispatchId: string
+  terminalHandle: string
+  lifecycle: WorkerContainerLifecycleBoundary
+  notify: (handle: string, messageType?: string) => void
+}): boolean {
+  const resultPath = join(args.lifecycle.directory, 'result.json')
+  if (!existsSync(resultPath)) {
+    return false
+  }
+  const receipt = parseReceipt(resultPath)
+  if (
+    receipt.dispatchId !== args.dispatchId ||
+    receipt.lifecycleBinding !== args.lifecycle.binding
+  ) {
+    throw new Error('worker_lifecycle_receipt_mismatch')
+  }
+  const dispatch = args.db.getDispatchContextById(args.dispatchId)
+  if (
+    !dispatch ||
+    dispatch.task_id !== args.taskId ||
+    dispatch.assignee_handle !== args.terminalHandle
+  ) {
+    throw new Error('worker_lifecycle_receipt_stale')
+  }
+  const messageId = `msg_${createHash('sha256')
+    .update(`${args.dispatchId}\n${args.lifecycle.binding}`)
+    .digest('hex')
+    .slice(0, 24)}`
+  let message = args.db.getMessageById(messageId)
+  if (!message) {
+    message = args.db.insertMessage({
+      id: messageId,
+      runId: args.runId,
+      from: args.terminalHandle,
+      to: `run:${args.runId}`,
+      senderPaneKey: dispatch.assignee_pane_key ?? undefined,
+      type: receipt.type,
+      priority: receipt.type === 'escalation' ? 'high' : 'normal',
+      subject: receipt.subject,
+      body: receipt.body,
+      payload: JSON.stringify({
+        taskId: args.taskId,
+        dispatchId: args.dispatchId,
+        ...(receipt.outcome ? { outcome: receipt.outcome } : {}),
+        lifecycleAdapter: 'container-file'
+      })
+    })
+  }
+  if (message.type === 'worker_done') {
+    reconcileLifecycleMessage(args.db, message)
+  }
+  args.notify(message.to_handle, message.type)
+  const admittedPath = join(args.lifecycle.directory, `${messageId}.admitted.json`)
+  if (!existsSync(admittedPath)) {
+    renameSync(resultPath, admittedPath)
+  }
+  return true
+}
+
+export function monitorWorkerContainerLifecycle(
+  args: Parameters<typeof admitWorkerContainerLifecycleReceipt>[0]
+): void {
+  const deadline = Date.now() + LIFECYCLE_MONITOR_MS
+  const poll = (): boolean => {
+    try {
+      return admitWorkerContainerLifecycleReceipt(args)
+    } catch (error) {
+      console.warn(
+        `[orchestration] rejected container lifecycle receipt for ${args.dispatchId}`,
+        error instanceof Error ? error.message : error
+      )
+      return true
+    }
+  }
+  if (poll()) {
+    return
+  }
+  const timer = setInterval(() => {
+    if (Date.now() >= deadline || poll()) {
+      clearInterval(timer)
+    }
+  }, LIFECYCLE_POLL_MS)
+  timer.unref()
+}
+
+export function restoreWorkerContainerLifecycleMonitors(args: {
+  db: OrchestrationDb
+  notify: (handle: string, messageType?: string) => void
+}): void {
+  // Some embedding/tests provide a deliberately narrow DB adapter. Absence is not evidence of
+  // retained container work, so recovery is inapplicable; the production DB always owns this API.
+  if (typeof args.db.listLegacyWorkerTerminalRecoveryRows !== 'function') {
+    return
+  }
+  for (const row of args.db.listLegacyWorkerTerminalRecoveryRows()) {
+    try {
+      if (
+        row.worker_state !== 'ready' ||
+        row.dispatch_status !== 'dispatched' ||
+        !row.assignee_handle
+      ) {
+        continue
+      }
+      const worker = args.db.getWorkerDispatch(row.dispatch_id)
+      if (!worker) {
+        continue
+      }
+      let startOptions: Record<string, unknown>
+      try {
+        startOptions = JSON.parse(worker.start_options) as Record<string, unknown>
+      } catch {
+        continue
+      }
+      const attestation = startOptions.authorityIsolation as
+        | { capabilityRef?: unknown; runId?: unknown; taskId?: unknown; dispatchId?: unknown }
+        | undefined
+      if (
+        typeof attestation?.capabilityRef !== 'string' ||
+        typeof attestation.runId !== 'string' ||
+        typeof attestation.taskId !== 'string' ||
+        attestation.dispatchId !== row.dispatch_id
+      ) {
+        continue
+      }
+      const lifecycle = createWorkerContainerLifecycleBoundary({
+        dispatchId: row.dispatch_id,
+        capabilityRef: attestation.capabilityRef
+      })
+      monitorWorkerContainerLifecycle({
+        db: args.db,
+        runId: attestation.runId,
+        taskId: attestation.taskId,
+        dispatchId: row.dispatch_id,
+        terminalHandle: row.assignee_handle,
+        lifecycle,
+        notify: args.notify
+      })
+    } catch (error) {
+      console.warn(
+        `[orchestration] failed to restore container lifecycle for ${row.dispatch_id}`,
+        error instanceof Error ? error.message : error
+      )
+    }
+  }
+}

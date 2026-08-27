@@ -25,6 +25,7 @@ import { MacosLoginSessionDeathWatch } from './macos-login-session-death-watch'
 import { readCurrentProcessMacSystemResolverHealth } from '../network/macos-system-resolver-health'
 import { readCurrentDaemonReadyIdentity } from './daemon-ready-identity'
 import { publishDaemonPidFile } from './daemon-spawner'
+import { recoverOrphanedWorkerAuthorityContainers } from '../providers/worker-authority-orphan-recovery'
 
 export type ParsedDaemonArgs = {
   socketPath: string
@@ -316,6 +317,14 @@ async function main(): Promise<void> {
       process.exit(0)
     }
   })
+  const workerRecovery = recoverOrphanedWorkerAuthorityContainers()
+  if (
+    workerRecovery.removedContainers ||
+    workerRecovery.removedRoots ||
+    workerRecovery.rejectedRoots
+  ) {
+    daemonLog.log('worker-authority-orphan-recovery', workerRecovery)
+  }
   deathWatch?.start()
 
   // Signal readiness to parent via IPC (if available)
