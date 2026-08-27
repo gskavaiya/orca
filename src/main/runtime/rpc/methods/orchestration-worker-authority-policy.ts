@@ -49,6 +49,12 @@ export const ORCHESTRATION_WORKER_AUTHORITY_POLICY_METHODS: RpcMethod[] = [
         )
       }
       const worktree = await runtime.showManagedTerminalWorkspace(params.worktree)
+      if (worktree.id.startsWith('folder:')) {
+        throw new OrchestrationError(
+          'worker_authority_policy_unsupported',
+          'NO_GITHUB_AUTHORITY currently requires a Git worktree workspace.'
+        )
+      }
       return issueWorkerAuthorityPolicyCapability({
         runtimeId: runtime.getRuntimeId(),
         agentId: params.agent,

@@ -188,6 +188,25 @@ describe('orchestration RPC methods', () => {
       })
     })
 
+    it('rejects folder workspaces during authority policy preflight', async () => {
+      setup()
+      mockCurrentWorkerStart()
+      vi.spyOn(runtime, 'supportsWorkerAuthorityIsolation').mockReturnValue(true)
+      vi.mocked(runtime.showManagedTerminalWorkspace).mockResolvedValue({
+        id: 'folder:workspace-1',
+        repoId: 'folder-workspace:group-1'
+      } as never)
+
+      await expect(
+        call('orchestration.workerPolicyCheck', {
+          policy: NO_GITHUB_AUTHORITY_POLICY,
+          agent: 'codex',
+          worktree: 'id:folder:workspace-1',
+          setup: 'skip'
+        })
+      ).rejects.toMatchObject({ code: 'worker_authority_policy_unsupported' })
+    })
+
     it('rejects a declared caller that disagrees with complete attested evidence', async () => {
       setup()
       mockCurrentWorkerStart()

@@ -175,6 +175,14 @@ describe('createPtySubprocess', () => {
           },
           command: 'codex --no-alt-screen',
           launchAgent: 'codex',
+          authorityOwner: {
+            schemaVersion: 'worker_authority_daemon_owner/1',
+            pid: process.pid,
+            startedAtMs: Date.now() - process.uptime() * 1000,
+            launchNonce: 'synthetic-daemon',
+            socketPath: join(root, 'daemon.sock'),
+            tokenPath: join(root, 'daemon.token')
+          },
           authorityIsolation: {
             schemaVersion: 'worker_authority_launch/1',
             policy: NO_GITHUB_AUTHORITY_POLICY,

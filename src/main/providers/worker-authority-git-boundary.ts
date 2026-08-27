@@ -5,7 +5,12 @@ const MAX_GIT_CONFIG_BYTES = 1024 * 1024
 
 export function resolveWorkerAuthorityGitMetadataPaths(workspacePath: string): string[] {
   const dotGitPath = join(workspacePath, '.git')
-  const stat = lstatSync(dotGitPath)
+  let stat
+  try {
+    stat = lstatSync(dotGitPath)
+  } catch {
+    throw new Error('worker_authority_isolation_failed')
+  }
   if (stat.isDirectory()) {
     return [realpathSync(dotGitPath)]
   }

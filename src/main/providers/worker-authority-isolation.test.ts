@@ -47,7 +47,15 @@ describe('worker authority container isolation', () => {
     writeFileSync(join(codexHome, 'auth.json'), '{"OPENAI_API_KEY":"synthetic-worker"}\n', {
       mode: 0o600
     })
-    return { hostHome, codexHome, workspacePath, lifecycleDirectory, tempRoot }
+    const owner = {
+      schemaVersion: 'worker_authority_daemon_owner/1',
+      pid: 12345,
+      startedAtMs: 1_700_000_000_000,
+      launchNonce: 'synthetic-daemon',
+      socketPath: join(root, 'daemon.sock'),
+      tokenPath: join(root, 'daemon.token')
+    } as const
+    return { hostHome, codexHome, workspacePath, lifecycleDirectory, tempRoot, owner }
   }
 
   function request(lifecycleDirectory: string) {
@@ -87,6 +95,7 @@ describe('worker authority container isolation', () => {
     })
     const prepared = prepareWorkerAuthorityIsolation({
       request: request(f.lifecycleDirectory),
+      owner: f.owner,
       agent: 'codex',
       env: {
         HOME: f.hostHome,
@@ -150,6 +159,7 @@ describe('worker authority container isolation', () => {
     expect(() =>
       prepareWorkerAuthorityIsolation({
         request: request(f.lifecycleDirectory),
+        owner: f.owner,
         agent: 'claude',
         env: { ORCA_WORKER_CODEX_HOME: f.codexHome },
         authorityCredentialEnv: { ORCA_WORKER_CODEX_HOME: f.codexHome },
@@ -163,6 +173,7 @@ describe('worker authority container isolation', () => {
     expect(() =>
       prepareWorkerAuthorityIsolation({
         request: { ...request(f.lifecycleDirectory), imageDigest: 'orca-worker-authority:latest' },
+        owner: f.owner,
         agent: 'codex',
         env: { ORCA_WORKER_CODEX_HOME: f.codexHome },
         authorityCredentialEnv: { ORCA_WORKER_CODEX_HOME: f.codexHome },
@@ -180,6 +191,7 @@ describe('worker authority container isolation', () => {
     expect(() =>
       prepareWorkerAuthorityIsolation({
         request: request(f.lifecycleDirectory),
+        owner: f.owner,
         agent: 'codex',
         env: { ORCA_WORKER_CODEX_HOME: f.codexHome },
         authorityCredentialEnv: { ORCA_WORKER_CODEX_HOME: f.codexHome },
@@ -197,6 +209,7 @@ describe('worker authority container isolation', () => {
     expect(() =>
       prepareWorkerAuthorityIsolation({
         request: request(f.lifecycleDirectory),
+        owner: f.owner,
         agent: 'codex',
         env: { CODEX_HOME: f.codexHome },
         authorityCredentialEnv: {},
@@ -216,6 +229,7 @@ describe('worker authority container isolation', () => {
     expect(() =>
       prepareWorkerAuthorityIsolation({
         request: request(f.lifecycleDirectory),
+        owner: f.owner,
         agent: 'codex',
         env: { ORCA_WORKER_CODEX_HOME: f.codexHome },
         authorityCredentialEnv: { ORCA_WORKER_CODEX_HOME: f.codexHome },
@@ -239,6 +253,7 @@ describe('worker authority container isolation', () => {
     expect(() =>
       prepareWorkerAuthorityIsolation({
         request: request(f.lifecycleDirectory),
+        owner: f.owner,
         agent: 'codex',
         env: { ORCA_WORKER_CODEX_HOME: founderCodexHome },
         authorityCredentialEnv: { ORCA_WORKER_CODEX_HOME: founderCodexHome },
@@ -255,6 +270,7 @@ describe('worker authority container isolation', () => {
     const f = fixture()
     const prepared = prepareWorkerAuthorityIsolation({
       request: request(f.lifecycleDirectory),
+      owner: f.owner,
       agent: 'codex',
       env: { ORCA_WORKER_CODEX_HOME: f.codexHome },
       authorityCredentialEnv: { ORCA_WORKER_CODEX_HOME: f.codexHome },
@@ -294,6 +310,7 @@ describe('worker authority container isolation', () => {
     const f = fixture()
     const prepared = prepareWorkerAuthorityIsolation({
       request: request(f.lifecycleDirectory),
+      owner: f.owner,
       agent: 'codex',
       env: { ORCA_WORKER_CODEX_HOME: f.codexHome },
       authorityCredentialEnv: { ORCA_WORKER_CODEX_HOME: f.codexHome },
@@ -331,6 +348,27 @@ describe('worker authority container isolation', () => {
     expect(() =>
       prepareWorkerAuthorityIsolation({
         request: request(f.lifecycleDirectory),
+        owner: f.owner,
+        agent: 'codex',
+        env: { ORCA_WORKER_CODEX_HOME: f.codexHome },
+        authorityCredentialEnv: { ORCA_WORKER_CODEX_HOME: f.codexHome },
+        workspacePath: f.workspacePath,
+        command: 'codex',
+        platform: 'darwin',
+        hostHome: f.hostHome,
+        tempRoot: f.tempRoot
+      })
+    ).toThrow('worker_authority_isolation_failed')
+  })
+
+  it('classifies a workspace without Git metadata as unsupported isolation', () => {
+    const f = fixture()
+    rmSync(join(f.workspacePath, '.git'), { recursive: true })
+
+    expect(() =>
+      prepareWorkerAuthorityIsolation({
+        request: request(f.lifecycleDirectory),
+        owner: f.owner,
         agent: 'codex',
         env: { ORCA_WORKER_CODEX_HOME: f.codexHome },
         authorityCredentialEnv: { ORCA_WORKER_CODEX_HOME: f.codexHome },

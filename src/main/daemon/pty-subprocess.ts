@@ -15,6 +15,7 @@ import type { StartupCommandDelivery } from '../../shared/codex-startup-delivery
 import type { TuiAgent } from '../../shared/tui-agent'
 import type { WorkerAuthorityIsolationLaunchRequest } from '../../shared/worker-authority-policy'
 import { prepareWorkerAuthorityIsolation } from '../providers/worker-authority-isolation'
+import type { WorkerAuthorityDaemonOwner } from '../providers/worker-authority-container-contract'
 
 const PTY_SPAWN_HEALTH_RETRY_ATTEMPTS = 2
 
@@ -29,6 +30,7 @@ export type PtySubprocessOptions = {
   startupCommandDelivery?: StartupCommandDelivery
   launchAgent?: TuiAgent
   authorityIsolation?: WorkerAuthorityIsolationLaunchRequest
+  authorityOwner?: WorkerAuthorityDaemonOwner
   /** Explicit shell executable path/basename requested by the renderer. */
   shellOverride?: string
   terminalWindowsWslDistro?: string | null
@@ -72,9 +74,13 @@ export async function createPtySubprocess(opts: PtySubprocessOptions): Promise<S
   const size = normalizePtySize(opts.cols, opts.rows)
   let env = createDaemonPtyEnvironment(opts)
   const launch = createPtyShellLaunchPlan(opts, env)
+  if (opts.authorityIsolation && !opts.authorityOwner) {
+    throw new Error('worker_authority_isolation_failed')
+  }
   const isolation = opts.authorityIsolation
     ? prepareWorkerAuthorityIsolation({
         request: opts.authorityIsolation,
+        owner: opts.authorityOwner as WorkerAuthorityDaemonOwner,
         agent: opts.launchAgent,
         env,
         workspacePath: launch.spawnCwd,

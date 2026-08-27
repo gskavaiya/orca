@@ -20,12 +20,14 @@ import {
 } from '../../shared/worker-authority-policy'
 import {
   WORKER_AUTHORITY_CID_FILE,
+  WORKER_AUTHORITY_DAEMON_OWNER_FILE,
   WORKER_AUTHORITY_DOCKER_PATH,
   WORKER_AUTHORITY_NONCE_LABEL,
   WORKER_AUTHORITY_OWNERSHIP_FILE,
   WORKER_AUTHORITY_POLICY_LABEL,
   WORKER_AUTHORITY_ROOT_LABEL,
-  WORKER_AUTHORITY_ROOT_PREFIX
+  WORKER_AUTHORITY_ROOT_PREFIX,
+  type WorkerAuthorityDaemonOwner
 } from './worker-authority-container-contract'
 import {
   buildWorkerAuthorityContainerEnvironment,
@@ -187,12 +189,26 @@ export function prepareWorkerAuthorityIsolation(args: {
   command: string | undefined
   /** Process-owner configuration only; never pass terminal or repository launch environment. */
   authorityCredentialEnv?: Record<string, string>
+  owner: WorkerAuthorityDaemonOwner
   platform?: NodeJS.Platform
   hostHome?: string
   tempRoot?: string
 }): PreparedWorkerAuthorityIsolation {
   const platform = args.platform ?? process.platform
   assertSupportedRequest(args.request, args.agent, platform)
+  if (
+    args.owner.schemaVersion !== 'worker_authority_daemon_owner/1' ||
+    !Number.isSafeInteger(args.owner.pid) ||
+    args.owner.pid <= 0 ||
+    !Number.isFinite(args.owner.startedAtMs) ||
+    args.owner.startedAtMs <= 0 ||
+    !args.owner.launchNonce ||
+    !args.owner.socketPath ||
+    !args.owner.tokenPath ||
+    Boolean(args.owner.linuxStartTicks) !== Boolean(args.owner.bootId)
+  ) {
+    throw new Error('worker_authority_isolation_failed')
+  }
   if (
     !args.command ||
     Buffer.byteLength(args.command) > 64 * 1024 ||
@@ -222,6 +238,14 @@ export function prepareWorkerAuthorityIsolation(args: {
       mode: 0o600,
       flag: 'wx'
     })
+    writeFileSync(
+      join(isolationRoot, WORKER_AUTHORITY_DAEMON_OWNER_FILE),
+      JSON.stringify(args.owner),
+      {
+        mode: 0o600,
+        flag: 'wx'
+      }
+    )
     const sanitizedGitConfigPath = join(isolationRoot, 'git-config')
     writeFileSync(sanitizedGitConfigPath, '', { mode: 0o600, flag: 'wx' })
     for (const path of ['.codex', '.config/gh', '.cache']) {

@@ -80,6 +80,14 @@ describe.skipIf(!LIVE_DOCKER)('worker authority live Docker recovery', () => {
           lifecycleDirectory,
           lifecycleBinding: `sha256:${'2'.repeat(64)}`
         },
+        owner: {
+          schemaVersion: 'worker_authority_daemon_owner/1',
+          pid: process.pid,
+          startedAtMs: Date.now() - process.uptime() * 1000,
+          launchNonce: 'live-orphan-recovery',
+          socketPath: join(tempRoot, 'daemon.sock'),
+          tokenPath: join(tempRoot, 'daemon.token')
+        },
         agent: 'codex',
         env: {
           HOME: process.env.HOME ?? hostHome,
@@ -118,7 +126,22 @@ describe.skipIf(!LIVE_DOCKER)('worker authority live Docker recovery', () => {
           timeoutMs: 5_000
         }).stdout.trim()
       ).toBe('running')
-      expect(recoverOrphanedWorkerAuthorityContainers({ platform: 'darwin', tempRoot })).toEqual({
+      await expect(
+        recoverOrphanedWorkerAuthorityContainers({
+          platform: 'darwin',
+          tempRoot,
+          probeOwner: async () => 'present'
+        })
+      ).resolves.toEqual({ removedContainers: 0, removedRoots: 0, rejectedRoots: 1 })
+      expect(existsSync(isolationRoot)).toBe(true)
+
+      await expect(
+        recoverOrphanedWorkerAuthorityContainers({
+          platform: 'darwin',
+          tempRoot,
+          probeOwner: async () => 'gone'
+        })
+      ).resolves.toEqual({
         removedContainers: 1,
         removedRoots: 1,
         rejectedRoots: 0

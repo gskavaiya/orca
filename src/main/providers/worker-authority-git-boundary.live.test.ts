@@ -49,6 +49,14 @@ describe.skipIf(!LIVE_DOCKER)('worker authority live linked-worktree boundary', 
           lifecycleDirectory,
           lifecycleBinding: `sha256:${'2'.repeat(64)}`
         },
+        owner: {
+          schemaVersion: 'worker_authority_daemon_owner/1',
+          pid: process.pid,
+          startedAtMs: Date.now() - process.uptime() * 1000,
+          launchNonce: 'live-git-boundary',
+          socketPath: join(tempRoot, 'daemon.sock'),
+          tokenPath: join(tempRoot, 'daemon.token')
+        },
         agent: 'codex',
         env: {
           HOME: process.env.HOME ?? tempRoot,

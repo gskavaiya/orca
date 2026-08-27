@@ -3,14 +3,17 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { runProcessSync } from '../../shared/child-process/run-process'
 import { NO_GITHUB_AUTHORITY_POLICY_DIGEST } from '../../shared/worker-authority-policy'
+import { probeDaemonProcessIdentity } from '../daemon/daemon-incarnation-evidence'
 import {
   WORKER_AUTHORITY_CID_FILE,
+  WORKER_AUTHORITY_DAEMON_OWNER_FILE,
   WORKER_AUTHORITY_DOCKER_PATH,
   WORKER_AUTHORITY_NONCE_LABEL,
   WORKER_AUTHORITY_OWNERSHIP_FILE,
   WORKER_AUTHORITY_POLICY_LABEL,
   WORKER_AUTHORITY_ROOT_LABEL,
-  WORKER_AUTHORITY_ROOT_PREFIX
+  WORKER_AUTHORITY_ROOT_PREFIX,
+  type WorkerAuthorityDaemonOwner
 } from './worker-authority-container-contract'
 
 export type WorkerAuthorityOrphanRecovery = {
@@ -32,6 +35,56 @@ function readRegularBoundedFile(path: string, maxBytes: number): string | null {
 }
 
 type OwnedContainerInspection = 'owned' | 'absent' | 'rejected' | 'unavailable'
+type DaemonOwnerState = 'present' | 'gone' | 'unknown'
+
+function readDaemonOwner(root: string): WorkerAuthorityDaemonOwner | null {
+  const raw = readRegularBoundedFile(join(root, WORKER_AUTHORITY_DAEMON_OWNER_FILE), 8 * 1024)
+  if (!raw) {
+    return null
+  }
+  try {
+    const owner = JSON.parse(raw) as Partial<WorkerAuthorityDaemonOwner>
+    if (
+      owner.schemaVersion !== 'worker_authority_daemon_owner/1' ||
+      !Number.isSafeInteger(owner.pid) ||
+      (owner.pid as number) <= 0 ||
+      typeof owner.startedAtMs !== 'number' ||
+      !Number.isFinite(owner.startedAtMs) ||
+      owner.startedAtMs <= 0 ||
+      typeof owner.launchNonce !== 'string' ||
+      owner.launchNonce.length === 0 ||
+      typeof owner.socketPath !== 'string' ||
+      owner.socketPath.length === 0 ||
+      typeof owner.tokenPath !== 'string' ||
+      owner.tokenPath.length === 0 ||
+      Boolean(owner.linuxStartTicks) !== Boolean(owner.bootId) ||
+      (owner.linuxStartTicks !== undefined && typeof owner.linuxStartTicks !== 'string') ||
+      (owner.bootId !== undefined && typeof owner.bootId !== 'string')
+    ) {
+      return null
+    }
+    return owner as WorkerAuthorityDaemonOwner
+  } catch {
+    return null
+  }
+}
+
+async function probeDaemonOwner(owner: WorkerAuthorityDaemonOwner): Promise<DaemonOwnerState> {
+  const evidence = await probeDaemonProcessIdentity(
+    {
+      identity: {
+        pid: owner.pid,
+        startedAtMs: owner.startedAtMs,
+        launchNonce: owner.launchNonce
+      },
+      ...(owner.linuxStartTicks && owner.bootId
+        ? { linuxStartTicks: owner.linuxStartTicks, bootId: owner.bootId }
+        : {})
+    },
+    { socketPath: owner.socketPath, tokenPath: owner.tokenPath }
+  )
+  return evidence.state
+}
 
 function inspectOwnedContainer(cid: string, root: string, nonce: string): OwnedContainerInspection {
   const result = runProcessSync({
@@ -85,10 +138,11 @@ function isOwnedRoot(root: string): boolean {
   }
 }
 
-export function recoverOrphanedWorkerAuthorityContainers(args?: {
+export async function recoverOrphanedWorkerAuthorityContainers(args?: {
   platform?: NodeJS.Platform
   tempRoot?: string
-}): WorkerAuthorityOrphanRecovery {
+  probeOwner?: (owner: WorkerAuthorityDaemonOwner) => Promise<DaemonOwnerState>
+}): Promise<WorkerAuthorityOrphanRecovery> {
   const outcome: WorkerAuthorityOrphanRecovery = {
     removedContainers: 0,
     removedRoots: 0,
@@ -111,11 +165,16 @@ export function recoverOrphanedWorkerAuthorityContainers(args?: {
     const root = join(tempRoot, name)
     const nonce = readRegularBoundedFile(join(root, WORKER_AUTHORITY_OWNERSHIP_FILE), 128)
     const cid = readRegularBoundedFile(join(root, WORKER_AUTHORITY_CID_FILE), 128)
+    const owner = readDaemonOwner(root)
     if (!isOwnedRoot(root) || !nonce || !/^[0-9a-f]{64}$/.test(nonce)) {
       outcome.rejectedRoots++
       continue
     }
     if (!cid || !/^[0-9a-f]{64}$/.test(cid)) {
+      outcome.rejectedRoots++
+      continue
+    }
+    if (!owner || (await (args?.probeOwner ?? probeDaemonOwner)(owner)) !== 'gone') {
       outcome.rejectedRoots++
       continue
     }

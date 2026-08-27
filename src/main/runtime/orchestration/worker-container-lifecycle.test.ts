@@ -11,6 +11,7 @@ import { WORKER_AUTHORITY_IMAGE } from '../../providers/worker-authority-isolati
 import {
   admitWorkerContainerLifecycleReceipt,
   createWorkerContainerLifecycleBoundary,
+  monitorWorkerContainerLifecycle,
   restoreWorkerContainerLifecycleMonitors
 } from './worker-container-lifecycle'
 
@@ -191,6 +192,73 @@ describe('worker container lifecycle adapter', () => {
     expect(messages).toHaveLength(1)
     expect(messages[0]).toMatchObject({ priority: 'high', subject: 'Blocked: owner decision' })
     expect(notify).toHaveBeenCalledWith(`run:${worker.task.run_id}`, 'escalation')
+  })
+
+  it('admits the reporter maximum body even when JSON escaping expands it', () => {
+    const worker = readyWorker()
+    writeReceipt(worker.lifecycle, {
+      schemaVersion: 'worker_lifecycle_receipt/1',
+      dispatchId: worker.dispatchId,
+      lifecycleBinding: worker.lifecycle.binding,
+      type: 'worker_done',
+      outcome: 'succeeded',
+      subject: 'Maximum escaped body',
+      body: '\0'.repeat(64 * 1024)
+    })
+
+    expect(
+      admitWorkerContainerLifecycleReceipt({
+        db: db!,
+        runId: worker.task.run_id,
+        taskId: worker.task.id,
+        dispatchId: worker.dispatchId,
+        terminalHandle: 'term_worker',
+        lifecycle: worker.lifecycle,
+        notify: vi.fn()
+      })
+    ).toBe(true)
+    expect(db!.getTask(worker.task.id)?.status).toBe('completed')
+  })
+
+  it('quarantines a malformed receipt, notifies the coordinator, and admits a correction', async () => {
+    vi.useFakeTimers()
+    try {
+      const worker = readyWorker()
+      const notify = vi.fn()
+      writeFileSync(join(worker.lifecycle.directory, 'result.json'), '{malformed', {
+        flag: 'wx',
+        mode: 0o600
+      })
+      monitorWorkerContainerLifecycle({
+        db: db!,
+        runId: worker.task.run_id,
+        taskId: worker.task.id,
+        dispatchId: worker.dispatchId,
+        terminalHandle: 'term_worker',
+        lifecycle: worker.lifecycle,
+        notify
+      })
+
+      expect(existsSync(join(worker.lifecycle.directory, 'result.json'))).toBe(false)
+      expect(db!.getUnreadMessages(`run:${worker.task.run_id}`, ['escalation'])).toHaveLength(1)
+      writeReceipt(worker.lifecycle, {
+        schemaVersion: 'worker_lifecycle_receipt/1',
+        dispatchId: worker.dispatchId,
+        lifecycleBinding: worker.lifecycle.binding,
+        type: 'worker_done',
+        outcome: 'succeeded',
+        subject: 'Corrected',
+        body: 'The corrected lifecycle receipt is valid.'
+      })
+
+      await vi.advanceTimersByTimeAsync(250)
+
+      expect(db!.getTask(worker.task.id)?.status).toBe('completed')
+      expect(notify).toHaveBeenCalledWith(`run:${worker.task.run_id}`, 'escalation')
+      expect(notify).toHaveBeenCalledWith(`run:${worker.task.run_id}`, 'worker_done')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('reconciles an existing deterministic message after an interrupted first admission', () => {

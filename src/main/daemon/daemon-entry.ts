@@ -26,6 +26,7 @@ import { readCurrentProcessMacSystemResolverHealth } from '../network/macos-syst
 import { readCurrentDaemonReadyIdentity } from './daemon-ready-identity'
 import { publishDaemonPidFile } from './daemon-spawner'
 import { recoverOrphanedWorkerAuthorityContainers } from '../providers/worker-authority-orphan-recovery'
+import type { WorkerAuthorityDaemonOwner } from '../providers/worker-authority-container-contract'
 
 export type ParsedDaemonArgs = {
   socketPath: string
@@ -123,6 +124,16 @@ async function main(): Promise<void> {
   } = parseArgs(process.argv.slice(2))
   const startedAtMs = Date.now() - process.uptime() * 1000
   const readyIdentity = await readCurrentDaemonReadyIdentity(startedAtMs)
+  const workerAuthorityOwner: WorkerAuthorityDaemonOwner | undefined = launchNonce
+    ? {
+        schemaVersion: 'worker_authority_daemon_owner/1',
+        pid: process.pid,
+        ...readyIdentity,
+        launchNonce,
+        socketPath,
+        tokenPath
+      }
+    : undefined
   // Fail-open: a broken log path must never block daemon startup.
   const daemonLog = logFilePath ? createDaemonFileLog(logFilePath) : createNoopDaemonFileLog()
   daemonLog.log('startup', { protocolVersion: PROTOCOL_VERSION, socketPath })
@@ -296,6 +307,7 @@ async function main(): Promise<void> {
     spawnSubprocess: (opts) =>
       createPtySubprocess({
         ...opts,
+        ...(workerAuthorityOwner ? { authorityOwner: workerAuthorityOwner } : {}),
         ...(process.platform === 'darwin'
           ? {
               onMacosTccSpawnStrategy: (strategy) =>
@@ -317,7 +329,7 @@ async function main(): Promise<void> {
       process.exit(0)
     }
   })
-  const workerRecovery = recoverOrphanedWorkerAuthorityContainers()
+  const workerRecovery = await recoverOrphanedWorkerAuthorityContainers()
   if (
     workerRecovery.removedContainers ||
     workerRecovery.removedRoots ||

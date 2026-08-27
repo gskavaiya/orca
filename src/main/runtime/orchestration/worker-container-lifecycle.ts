@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -6,7 +6,7 @@ import type { OrchestrationDb } from './db'
 import { reconcileLifecycleMessage } from './lifecycle-reconciliation'
 
 const LIFECYCLE_SCHEMA_VERSION = 'worker_lifecycle_receipt/1'
-const MAX_LIFECYCLE_RECEIPT_BYTES = 66 * 1024
+const MAX_LIFECYCLE_RECEIPT_BYTES = 64 * 1024 * 6 + 512 * 6 + 4 * 1024
 const LIFECYCLE_POLL_MS = 250
 const LIFECYCLE_MONITOR_MS = 24 * 60 * 60 * 1_000
 
@@ -139,6 +139,47 @@ export function admitWorkerContainerLifecycleReceipt(args: {
   return true
 }
 
+function quarantineRejectedLifecycleReceipt(
+  args: Parameters<typeof admitWorkerContainerLifecycleReceipt>[0],
+  error: unknown
+): void {
+  const resultPath = join(args.lifecycle.directory, 'result.json')
+  if (!existsSync(resultPath)) {
+    return
+  }
+  const rejectedName = `rejected-${randomUUID()}.json`
+  const rejectedPath = join(args.lifecycle.directory, rejectedName)
+  renameSync(resultPath, rejectedPath)
+  const reason = error instanceof Error ? error.message : String(error)
+  try {
+    const message = args.db.insertMessage({
+      id: `msg_${createHash('sha256')
+        .update(`${args.dispatchId}\n${rejectedName}`)
+        .digest('hex')
+        .slice(0, 24)}`,
+      runId: args.runId,
+      from: args.terminalHandle,
+      to: `run:${args.runId}`,
+      type: 'escalation',
+      priority: 'high',
+      subject: 'Container lifecycle receipt rejected',
+      body: `Orca rejected a container lifecycle receipt (${reason}). The worker may send one corrected receipt.`,
+      payload: JSON.stringify({
+        taskId: args.taskId,
+        dispatchId: args.dispatchId,
+        lifecycleAdapter: 'container-file',
+        rejection: reason
+      })
+    })
+    args.notify(message.to_handle, message.type)
+  } catch (notificationError) {
+    if (!existsSync(resultPath) && existsSync(rejectedPath)) {
+      renameSync(rejectedPath, resultPath)
+    }
+    throw notificationError
+  }
+}
+
 export function monitorWorkerContainerLifecycle(
   args: Parameters<typeof admitWorkerContainerLifecycleReceipt>[0]
 ): void {
@@ -151,7 +192,15 @@ export function monitorWorkerContainerLifecycle(
         `[orchestration] rejected container lifecycle receipt for ${args.dispatchId}`,
         error instanceof Error ? error.message : error
       )
-      return true
+      try {
+        quarantineRejectedLifecycleReceipt(args, error)
+      } catch (quarantineError) {
+        console.warn(
+          `[orchestration] failed to quarantine container lifecycle receipt for ${args.dispatchId}`,
+          quarantineError instanceof Error ? quarantineError.message : quarantineError
+        )
+      }
+      return false
     }
   }
   if (poll()) {
