@@ -1,6 +1,29 @@
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+
+const fsBoundary = vi.hoisted(() => ({ rejectLifecyclePathReopen: false }))
+
+vi.mock('node:fs', async (importOriginal) => {
+  type NodeFsModule = Record<string, unknown> & {
+    readFileSync: (...args: unknown[]) => unknown
+  }
+  const actual = await importOriginal<NodeFsModule>()
+  return {
+    ...actual,
+    readFileSync: (...args: unknown[]) => {
+      if (
+        fsBoundary.rejectLifecyclePathReopen &&
+        typeof args[0] === 'string' &&
+        args[0].endsWith('/result.json')
+      ) {
+        throw new Error('worker_lifecycle_receipt_path_reopened')
+      }
+      return Reflect.apply(actual.readFileSync, actual, args)
+    }
+  }
+})
+
 import { OrchestrationDb } from './db'
 import {
   NO_GITHUB_AUTHORITY_POLICY,
@@ -20,6 +43,7 @@ describe('worker container lifecycle adapter', () => {
   const roots: string[] = []
 
   afterEach(() => {
+    fsBoundary.rejectLifecyclePathReopen = false
     db?.close()
     db = undefined
     for (const root of roots.splice(0)) {
@@ -116,7 +140,7 @@ describe('worker container lifecycle adapter', () => {
         lifecycle: worker.lifecycle,
         notify
       })
-    ).toBe(true)
+    ).toBe('settled')
     expect(db!.getTask(worker.task.id)?.status).toBe('completed')
     expect(notify).toHaveBeenCalledWith(`run:${worker.task.run_id}`, 'worker_done')
     expect(existsSync(join(worker.lifecycle.directory, 'result.json'))).toBe(false)
@@ -133,8 +157,9 @@ describe('worker container lifecycle adapter', () => {
         lifecycle: worker.lifecycle,
         notify
       })
-    ).toBe(true)
+    ).toBe('settled')
     expect(db!.getUnreadMessages(`run:${worker.task.run_id}`, ['worker_done'])).toHaveLength(1)
+    expect(existsSync(join(worker.lifecycle.directory, 'result.json'))).toBe(false)
   })
 
   it('rejects a mismatched binding without writing lifecycle state', () => {
@@ -186,12 +211,134 @@ describe('worker container lifecycle adapter', () => {
         lifecycle: worker.lifecycle,
         notify
       })
-    ).toBe(true)
+    ).toBe('admitted')
     expect(db!.getTask(worker.task.id)?.status).toBe('dispatched')
     const messages = db!.getUnreadMessages(`run:${worker.task.run_id}`, ['escalation'])
     expect(messages).toHaveLength(1)
     expect(messages[0]).toMatchObject({ priority: 'high', subject: 'Blocked: owner decision' })
     expect(notify).toHaveBeenCalledWith(`run:${worker.task.run_id}`, 'escalation')
+  })
+
+  it.each(['succeeded', 'failed'] as const)(
+    'keeps monitoring after escalation and admits later %s completion',
+    async (outcome) => {
+      vi.useFakeTimers()
+      try {
+        const worker = readyWorker()
+        const notify = vi.fn()
+        writeReceipt(worker.lifecycle, {
+          schemaVersion: 'worker_lifecycle_receipt/1',
+          dispatchId: worker.dispatchId,
+          lifecycleBinding: worker.lifecycle.binding,
+          type: 'escalation',
+          subject: 'Blocked: owner decision',
+          body: 'The worker can continue after the coordinator answers.'
+        })
+        monitorWorkerContainerLifecycle({
+          db: db!,
+          runId: worker.task.run_id,
+          taskId: worker.task.id,
+          dispatchId: worker.dispatchId,
+          terminalHandle: 'term_worker',
+          lifecycle: worker.lifecycle,
+          notify
+        })
+
+        writeReceipt(worker.lifecycle, {
+          schemaVersion: 'worker_lifecycle_receipt/1',
+          dispatchId: worker.dispatchId,
+          lifecycleBinding: worker.lifecycle.binding,
+          type: 'worker_done',
+          outcome,
+          subject: 'Completed after decision',
+          body: 'The worker continued after escalation and reached a terminal outcome.'
+        })
+        await vi.advanceTimersByTimeAsync(250)
+
+        expect(db!.getTask(worker.task.id)?.status).toBe(
+          outcome === 'succeeded' ? 'completed' : 'failed'
+        )
+        expect(db!.getUnreadMessages(`run:${worker.task.run_id}`, ['escalation'])).toHaveLength(1)
+        expect(db!.getUnreadMessages(`run:${worker.task.run_id}`, ['worker_done'])).toHaveLength(1)
+        expect(notify).toHaveBeenCalledWith(`run:${worker.task.run_id}`, 'escalation')
+        expect(notify).toHaveBeenCalledWith(`run:${worker.task.run_id}`, 'worker_done')
+        expect(existsSync(join(worker.lifecycle.directory, 'result.json'))).toBe(false)
+      } finally {
+        vi.useRealTimers()
+      }
+    }
+  )
+
+  it('does not reopen the worker-controlled receipt path after validation', () => {
+    const worker = readyWorker()
+    writeReceipt(worker.lifecycle, {
+      schemaVersion: 'worker_lifecycle_receipt/1',
+      dispatchId: worker.dispatchId,
+      lifecycleBinding: worker.lifecycle.binding,
+      type: 'worker_done',
+      outcome: 'succeeded',
+      subject: 'Descriptor-bound receipt',
+      body: 'The parser must validate and read through one bounded descriptor.'
+    })
+    fsBoundary.rejectLifecyclePathReopen = true
+
+    expect(
+      admitWorkerContainerLifecycleReceipt({
+        db: db!,
+        runId: worker.task.run_id,
+        taskId: worker.task.id,
+        dispatchId: worker.dispatchId,
+        terminalHandle: 'term_worker',
+        lifecycle: worker.lifecycle,
+        notify: vi.fn()
+      })
+    ).toBe('settled')
+  })
+
+  it('replays escalation and settles later completion after database restart', () => {
+    const worker = readyWorker(true)
+    const escalation = {
+      schemaVersion: 'worker_lifecycle_receipt/1',
+      dispatchId: worker.dispatchId,
+      lifecycleBinding: worker.lifecycle.binding,
+      type: 'escalation',
+      subject: 'Decision required',
+      body: 'The worker can continue after a retained answer.'
+    }
+    const args = {
+      db: db!,
+      runId: worker.task.run_id,
+      taskId: worker.task.id,
+      dispatchId: worker.dispatchId,
+      terminalHandle: 'term_worker',
+      lifecycle: worker.lifecycle,
+      notify: vi.fn()
+    }
+    writeReceipt(worker.lifecycle, escalation)
+    expect(admitWorkerContainerLifecycleReceipt(args)).toBe('admitted')
+    writeReceipt(worker.lifecycle, escalation)
+    expect(admitWorkerContainerLifecycleReceipt(args)).toBe('admitted')
+    expect(db!.getUnreadMessages(`run:${worker.task.run_id}`, ['escalation'])).toHaveLength(1)
+    const escalationId = db!.getUnreadMessages(`run:${worker.task.run_id}`, ['escalation'])[0]!.id
+    expect(existsSync(join(worker.lifecycle.directory, 'result.json'))).toBe(false)
+
+    db!.close()
+    db = new OrchestrationDb(join(worker.root, 'orchestration.sqlite'))
+    writeReceipt(worker.lifecycle, {
+      schemaVersion: 'worker_lifecycle_receipt/1',
+      dispatchId: worker.dispatchId,
+      lifecycleBinding: worker.lifecycle.binding,
+      type: 'worker_done',
+      outcome: 'succeeded',
+      subject: 'Completed after restart',
+      body: 'The retained escalation did not consume the completion identity.'
+    })
+    restoreWorkerContainerLifecycleMonitors({ db, notify: vi.fn() })
+
+    expect(db.getTask(worker.task.id)?.status).toBe('completed')
+    expect(db.getMessageById(escalationId)?.type).toBe('escalation')
+    expect(db.getUnreadMessages(`run:${worker.task.run_id}`, ['worker_done'])).toHaveLength(1)
+    expect(existsSync(join(worker.lifecycle.directory, 'result.json'))).toBe(false)
   })
 
   it('admits the reporter maximum body even when JSON escaping expands it', () => {
@@ -216,7 +363,7 @@ describe('worker container lifecycle adapter', () => {
         lifecycle: worker.lifecycle,
         notify: vi.fn()
       })
-    ).toBe(true)
+    ).toBe('settled')
     expect(db!.getTask(worker.task.id)?.status).toBe('completed')
   })
 
@@ -291,7 +438,7 @@ describe('worker container lifecycle adapter', () => {
     expect(db!.getUnreadMessages(`run:${worker.task.run_id}`, ['worker_done'])).toHaveLength(1)
     settlement.mockRestore()
 
-    expect(admitWorkerContainerLifecycleReceipt(args)).toBe(true)
+    expect(admitWorkerContainerLifecycleReceipt(args)).toBe('settled')
     expect(db!.getTask(worker.task.id)?.status).toBe('completed')
     expect(db!.getUnreadMessages(`run:${worker.task.run_id}`, ['worker_done'])).toHaveLength(1)
   })

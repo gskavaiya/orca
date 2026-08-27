@@ -1,9 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, realpathSync, renameSync, unlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { OrchestrationDb } from './db'
 import { reconcileLifecycleMessage } from './lifecycle-reconciliation'
+import { readBoundedWorkerLifecycleReceipt } from './worker-container-lifecycle-receipt'
 
 const LIFECYCLE_SCHEMA_VERSION = 'worker_lifecycle_receipt/1'
 const MAX_LIFECYCLE_RECEIPT_BYTES = 64 * 1024 * 6 + 512 * 6 + 4 * 1024
@@ -24,6 +25,8 @@ type WorkerContainerLifecycleReceipt = {
   body: string
   outcome?: 'succeeded' | 'failed'
 }
+
+type WorkerContainerLifecycleAdmission = 'absent' | 'admitted' | 'settled'
 
 export function createWorkerContainerLifecycleBoundary(args: {
   dispatchId: string
@@ -47,11 +50,9 @@ export function createWorkerContainerLifecycleBoundary(args: {
 }
 
 function parseReceipt(path: string): WorkerContainerLifecycleReceipt {
-  const stat = lstatSync(path)
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_LIFECYCLE_RECEIPT_BYTES) {
-    throw new Error('worker_lifecycle_receipt_invalid')
-  }
-  const value: unknown = JSON.parse(readFileSync(path, 'utf8'))
+  const value: unknown = JSON.parse(
+    readBoundedWorkerLifecycleReceipt(path, MAX_LIFECYCLE_RECEIPT_BYTES)
+  )
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error('worker_lifecycle_receipt_invalid')
   }
@@ -84,10 +85,10 @@ export function admitWorkerContainerLifecycleReceipt(args: {
   terminalHandle: string
   lifecycle: WorkerContainerLifecycleBoundary
   notify: (handle: string, messageType?: string) => void
-}): boolean {
+}): WorkerContainerLifecycleAdmission {
   const resultPath = join(args.lifecycle.directory, 'result.json')
   if (!existsSync(resultPath)) {
-    return false
+    return 'absent'
   }
   const receipt = parseReceipt(resultPath)
   if (
@@ -105,7 +106,16 @@ export function admitWorkerContainerLifecycleReceipt(args: {
     throw new Error('worker_lifecycle_receipt_stale')
   }
   const messageId = `msg_${createHash('sha256')
-    .update(`${args.dispatchId}\n${args.lifecycle.binding}`)
+    .update(
+      JSON.stringify({
+        dispatchId: args.dispatchId,
+        lifecycleBinding: args.lifecycle.binding,
+        type: receipt.type,
+        outcome: receipt.outcome ?? null,
+        subject: receipt.subject,
+        body: receipt.body
+      })
+    )
     .digest('hex')
     .slice(0, 24)}`
   let message = args.db.getMessageById(messageId)
@@ -133,10 +143,12 @@ export function admitWorkerContainerLifecycleReceipt(args: {
   }
   args.notify(message.to_handle, message.type)
   const admittedPath = join(args.lifecycle.directory, `${messageId}.admitted.json`)
-  if (!existsSync(admittedPath)) {
+  if (existsSync(admittedPath)) {
+    unlinkSync(resultPath)
+  } else {
     renameSync(resultPath, admittedPath)
   }
-  return true
+  return receipt.type === 'worker_done' ? 'settled' : 'admitted'
 }
 
 function quarantineRejectedLifecycleReceipt(
@@ -186,7 +198,7 @@ export function monitorWorkerContainerLifecycle(
   const deadline = Date.now() + LIFECYCLE_MONITOR_MS
   const poll = (): boolean => {
     try {
-      return admitWorkerContainerLifecycleReceipt(args)
+      return admitWorkerContainerLifecycleReceipt(args) === 'settled'
     } catch (error) {
       console.warn(
         `[orchestration] rejected container lifecycle receipt for ${args.dispatchId}`,
