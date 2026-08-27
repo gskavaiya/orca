@@ -1,7 +1,24 @@
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from 'node:fs'
 
+const UNREADABLE_RECEIPT_PREFIX = 'worker_lifecycle_receipt_unreadable'
+
+export function isWorkerLifecycleReceiptUnreadable(error: unknown): error is Error {
+  return error instanceof Error && error.message.startsWith(`${UNREADABLE_RECEIPT_PREFIX}:`)
+}
+
+function unreadableReceiptError(error: unknown): Error {
+  const code =
+    error && typeof error === 'object' && 'code' in error && typeof error.code === 'string'
+      ? error.code
+      : 'UNKNOWN'
+  return new Error(`${UNREADABLE_RECEIPT_PREFIX}:${code}`)
+}
+
 export function readBoundedWorkerLifecycleReceipt(path: string, maxBytes: number): string {
   let descriptor: number | undefined
+  let failed = false
+  let failure: unknown
+  let result: string | undefined
   try {
     descriptor = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
     const stat = fstatSync(descriptor)
@@ -27,15 +44,23 @@ export function readBoundedWorkerLifecycleReceipt(path: string, maxBytes: number
     if (offset !== bytes.length) {
       throw new Error('worker_lifecycle_receipt_invalid')
     }
-    return bytes.toString('utf8')
+    result = bytes.toString('utf8')
   } catch (error) {
-    if (error instanceof Error && error.message === 'worker_lifecycle_receipt_invalid') {
-      throw error
-    }
-    throw new Error('worker_lifecycle_receipt_invalid')
-  } finally {
-    if (descriptor !== undefined) {
+    failed = true
+    failure = error
+  }
+  if (descriptor !== undefined) {
+    try {
       closeSync(descriptor)
+    } catch (error) {
+      throw unreadableReceiptError(error)
     }
   }
+  if (failure instanceof Error && failure.message === 'worker_lifecycle_receipt_invalid') {
+    throw failure
+  }
+  if (failed) {
+    throw unreadableReceiptError(failure)
+  }
+  return result as string
 }

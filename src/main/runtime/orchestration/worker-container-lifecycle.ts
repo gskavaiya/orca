@@ -4,7 +4,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { OrchestrationDb } from './db'
 import { reconcileLifecycleMessage } from './lifecycle-reconciliation'
-import { readBoundedWorkerLifecycleReceipt } from './worker-container-lifecycle-receipt'
+import {
+  isWorkerLifecycleReceiptUnreadable,
+  readBoundedWorkerLifecycleReceipt
+} from './worker-container-lifecycle-receipt'
 
 const LIFECYCLE_SCHEMA_VERSION = 'worker_lifecycle_receipt/1'
 const MAX_LIFECYCLE_RECEIPT_BYTES = 64 * 1024 * 6 + 512 * 6 + 4 * 1024
@@ -200,6 +203,13 @@ export function monitorWorkerContainerLifecycle(
     try {
       return admitWorkerContainerLifecycleReceipt(args) === 'settled'
     } catch (error) {
+      if (isWorkerLifecycleReceiptUnreadable(error)) {
+        console.warn(
+          `[orchestration] retrying unreadable container lifecycle receipt for ${args.dispatchId}`,
+          error.message
+        )
+        return false
+      }
       console.warn(
         `[orchestration] rejected container lifecycle receipt for ${args.dispatchId}`,
         error instanceof Error ? error.message : error

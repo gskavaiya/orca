@@ -2,24 +2,47 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-const fsBoundary = vi.hoisted(() => ({ rejectLifecyclePathReopen: false }))
+const fsBoundary = vi.hoisted(() => ({
+  failOperationOnce: undefined as 'open' | 'read' | undefined,
+  resultDescriptor: undefined as number | undefined,
+  resultPathOpens: 0
+}))
 
 vi.mock('node:fs', async (importOriginal) => {
   type NodeFsModule = Record<string, unknown> & {
-    readFileSync: (...args: unknown[]) => unknown
+    closeSync: (...args: unknown[]) => unknown
+    openSync: (...args: unknown[]) => unknown
+    readSync: (...args: unknown[]) => unknown
   }
   const actual = await importOriginal<NodeFsModule>()
   return {
     ...actual,
-    readFileSync: (...args: unknown[]) => {
-      if (
-        fsBoundary.rejectLifecyclePathReopen &&
-        typeof args[0] === 'string' &&
-        args[0].endsWith('/result.json')
-      ) {
-        throw new Error('worker_lifecycle_receipt_path_reopened')
+    closeSync: (...args: unknown[]) => {
+      if (args[0] === fsBoundary.resultDescriptor) {
+        fsBoundary.resultDescriptor = undefined
       }
-      return Reflect.apply(actual.readFileSync, actual, args)
+      return Reflect.apply(actual.closeSync, actual, args)
+    },
+    openSync: (...args: unknown[]) => {
+      if (typeof args[0] === 'string' && args[0].endsWith('/result.json')) {
+        fsBoundary.resultPathOpens += 1
+        if (fsBoundary.failOperationOnce === 'open') {
+          fsBoundary.failOperationOnce = undefined
+          throw Object.assign(new Error('synthetic open failure'), { code: 'EMFILE' })
+        }
+      }
+      const descriptor = Reflect.apply(actual.openSync, actual, args)
+      if (typeof args[0] === 'string' && args[0].endsWith('/result.json')) {
+        fsBoundary.resultDescriptor = descriptor as number
+      }
+      return descriptor
+    },
+    readSync: (...args: unknown[]) => {
+      if (args[0] === fsBoundary.resultDescriptor && fsBoundary.failOperationOnce === 'read') {
+        fsBoundary.failOperationOnce = undefined
+        throw Object.assign(new Error('synthetic read failure'), { code: 'EIO' })
+      }
+      return Reflect.apply(actual.readSync, actual, args)
     }
   }
 })
@@ -43,7 +66,9 @@ describe('worker container lifecycle adapter', () => {
   const roots: string[] = []
 
   afterEach(() => {
-    fsBoundary.rejectLifecyclePathReopen = false
+    fsBoundary.failOperationOnce = undefined
+    fsBoundary.resultDescriptor = undefined
+    fsBoundary.resultPathOpens = 0
     db?.close()
     db = undefined
     for (const root of roots.splice(0)) {
@@ -269,7 +294,7 @@ describe('worker container lifecycle adapter', () => {
     }
   )
 
-  it('does not reopen the worker-controlled receipt path after validation', () => {
+  it('opens the worker-controlled receipt path exactly once', () => {
     const worker = readyWorker()
     writeReceipt(worker.lifecycle, {
       schemaVersion: 'worker_lifecycle_receipt/1',
@@ -280,7 +305,7 @@ describe('worker container lifecycle adapter', () => {
       subject: 'Descriptor-bound receipt',
       body: 'The parser must validate and read through one bounded descriptor.'
     })
-    fsBoundary.rejectLifecyclePathReopen = true
+    fsBoundary.resultPathOpens = 0
 
     expect(
       admitWorkerContainerLifecycleReceipt({
@@ -293,7 +318,52 @@ describe('worker container lifecycle adapter', () => {
         notify: vi.fn()
       })
     ).toBe('settled')
+    expect(fsBoundary.resultPathOpens).toBe(1)
   })
+
+  it.each(['open', 'read'] as const)(
+    'retries a transient host %s failure without quarantining the valid receipt',
+    async (operation) => {
+      vi.useFakeTimers()
+      try {
+        const worker = readyWorker()
+        const notify = vi.fn()
+        writeReceipt(worker.lifecycle, {
+          schemaVersion: 'worker_lifecycle_receipt/1',
+          dispatchId: worker.dispatchId,
+          lifecycleBinding: worker.lifecycle.binding,
+          type: 'worker_done',
+          outcome: 'succeeded',
+          subject: 'Retained after host failure',
+          body: 'The unchanged valid receipt must be retried.'
+        })
+        fsBoundary.failOperationOnce = operation
+
+        monitorWorkerContainerLifecycle({
+          db: db!,
+          runId: worker.task.run_id,
+          taskId: worker.task.id,
+          dispatchId: worker.dispatchId,
+          terminalHandle: 'term_worker',
+          lifecycle: worker.lifecycle,
+          notify
+        })
+
+        expect(existsSync(join(worker.lifecycle.directory, 'result.json'))).toBe(true)
+        expect(db!.getUnreadMessages(`run:${worker.task.run_id}`, ['escalation'])).toHaveLength(0)
+        expect(db!.getTask(worker.task.id)?.status).toBe('dispatched')
+
+        await vi.advanceTimersByTimeAsync(250)
+
+        expect(db!.getTask(worker.task.id)?.status).toBe('completed')
+        expect(existsSync(join(worker.lifecycle.directory, 'result.json'))).toBe(false)
+        expect(db!.getUnreadMessages(`run:${worker.task.run_id}`, ['worker_done'])).toHaveLength(1)
+        expect(notify).toHaveBeenCalledTimes(1)
+      } finally {
+        vi.useRealTimers()
+      }
+    }
+  )
 
   it('replays escalation and settles later completion after database restart', () => {
     const worker = readyWorker(true)
