@@ -156,14 +156,14 @@ export function resolveManagedWslCodexShellPreflightTarget(
   return { runtimeHomePath: toWindowsWslPath(codexHome, wslDistro), wslDistro }
 }
 
-export function prepareManagedWslCodexHomeBeforeShellLaunch(args: {
+export async function prepareManagedWslCodexHomeBeforeShellLaunch(args: {
   env: ShellPreflightEnvironment
   hooksEnabled: boolean
   install?: (
     runtimeHomePath: string,
     target: CodexWslRuntimeHookTarget
-  ) => AgentHookInstallStatus | null
-}): AgentHookInstallStatus | null {
+  ) => AgentHookInstallStatus | Promise<AgentHookInstallStatus | null> | null
+}): Promise<AgentHookInstallStatus | null> {
   if (!args.hooksEnabled) {
     return null
   }
@@ -175,5 +175,8 @@ export function prepareManagedWslCodexHomeBeforeShellLaunch(args: {
     args.install ??
     ((home: string, hookTarget: CodexWslRuntimeHookTarget) =>
       codexHookService.installForRuntimeHome(home, hookTarget))
-  return install(target.runtimeHomePath, { runtime: 'wsl', wslDistro: target.wslDistro })
+  return await install(target.runtimeHomePath, {
+    runtime: 'wsl',
+    wslDistro: target.wslDistro
+  })
 }

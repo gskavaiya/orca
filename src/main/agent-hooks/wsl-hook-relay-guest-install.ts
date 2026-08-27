@@ -6,13 +6,14 @@ import type { ManagedHookDetectionSettings } from './managed-hook-detection-comm
 import type { installRemoteManagedAgentHooks } from './remote-managed-hook-installers'
 import { requestGuestOpenCodeOverlayDir } from './wsl-guest-plugin-install'
 import { installWslGuestHooks } from './wsl-hook-fs-adapter'
-import { REINSTALL_MIN_INTERVAL_MS } from './wsl-hook-relay-deps'
+import { REINSTALL_MIN_INTERVAL_MS, type WslHookRelayManagerDeps } from './wsl-hook-relay-deps'
 import type { SshChannelMultiplexer } from '../ssh/ssh-channel-multiplexer'
 import type { PluginSources } from '../../relay/plugin-overlay'
 
 /** Structural slice of WslHookRelayManagerDeps — only what an install pass uses. */
 type GuestInstallDeps = {
   installHooks: typeof installRemoteManagedAgentHooks
+  installCodex: WslHookRelayManagerDeps['installCodex']
   managedHookSettings: () => ManagedHookDetectionSettings
   pluginSources: () => PluginSources
   warn: (message: string) => void
@@ -39,6 +40,7 @@ export async function runWslRelayGuestInstall(
     guestHome,
     distro: state.distro,
     installHooks: deps.installHooks,
+    installCodex: deps.installCodex,
     settings: deps.managedHookSettings(),
     warn: deps.warn
   })

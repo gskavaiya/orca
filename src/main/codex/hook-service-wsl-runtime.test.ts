@@ -82,7 +82,7 @@ function expectedManagedCommand(scriptPath: string): string {
 }
 
 describe('Codex WSL runtime hook install', () => {
-  it('plans WSL hook files with Linux command and trust paths', async () => {
+  it('plans WSL hook files with Linux command and trust paths', () => {
     const runtimeHome =
       '\\\\wsl.localhost\\Ubuntu\\home\\alice\\.local\\share\\orca\\codex-runtime-home\\home'
 

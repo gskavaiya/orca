@@ -38,7 +38,7 @@ describe('agent hook RPC methods', () => {
 
   it('installs the pane-selected WSL home once and returns its status', async () => {
     const status = { agent: 'codex', state: 'installed' }
-    installForRuntimeHomeMock.mockReturnValue(status)
+    installForRuntimeHomeMock.mockResolvedValue(status)
     const method = prepareMethod()
     const params = method.params!.parse({
       codexHome: '/home/jin/.local/share/orca/codex-runtime-home/home',
@@ -46,7 +46,7 @@ describe('agent hook RPC methods', () => {
       wslDistro: 'Ubuntu-24.04'
     })
 
-    expect(method.handler(params, { runtime: runtimeWithSettings() })).toBe(status)
+    await expect(method.handler(params, { runtime: runtimeWithSettings() })).resolves.toBe(status)
     expect(installForRuntimeHomeMock).toHaveBeenCalledExactlyOnceWith(
       '\\\\wsl.localhost\\Ubuntu-24.04\\home\\jin\\.local\\share\\orca\\codex-runtime-home\\home',
       { runtime: 'wsl', wslDistro: 'Ubuntu-24.04' }
@@ -64,9 +64,9 @@ describe('agent hook RPC methods', () => {
       wslDistro: 'Ubuntu'
     })
 
-    expect(
+    await expect(
       method.handler(params, { runtime: runtimeWithSettings(enabled, disabledTuiAgents) })
-    ).toBeNull()
+    ).resolves.toBeNull()
     expect(installForRuntimeHomeMock).not.toHaveBeenCalled()
   })
 
@@ -78,19 +78,17 @@ describe('agent hook RPC methods', () => {
       wslDistro: 'Ubuntu'
     })
 
-    expect(() =>
+    await expect(
       method.handler(params, {
         runtime: runtimeWithSettings(),
         clientKind: 'runtime'
       } as RpcContext)
-    ).toThrow(/only available to the local Orca CLI/)
+    ).rejects.toThrow(/only available to the local Orca CLI/)
     expect(installForRuntimeHomeMock).not.toHaveBeenCalled()
   })
 
-  it('propagates an attempted installer failure', () => {
-    installForRuntimeHomeMock.mockImplementation(() => {
-      throw new Error('install failed')
-    })
+  it('propagates an attempted installer failure', async () => {
+    installForRuntimeHomeMock.mockRejectedValue(new Error('install failed'))
     const method = prepareMethod()
     const params = method.params!.parse({
       codexHome: '/home/jin/.local/share/orca/codex-runtime-home/home',
@@ -98,7 +96,7 @@ describe('agent hook RPC methods', () => {
       wslDistro: 'Ubuntu'
     })
 
-    expect(() => method.handler(params, { runtime: runtimeWithSettings() })).toThrow(
+    await expect(method.handler(params, { runtime: runtimeWithSettings() })).rejects.toThrow(
       'install failed'
     )
     expect(installForRuntimeHomeMock).toHaveBeenCalledOnce()

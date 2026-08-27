@@ -229,6 +229,13 @@ describe('WslHookRelayManager', () => {
       waitForSentinel: vi.fn(async () => guestTransport()),
       ingest: vi.fn(),
       installHooks: vi.fn(async () => []),
+      installCodex: vi.fn(async () => ({
+        agent: 'codex' as const,
+        state: 'installed' as const,
+        configPath: `${home}/.local/share/orca/codex-runtime-home/home/hooks.json`,
+        managedHooksPresent: true,
+        detail: null
+      })),
       managedHookSettings: () => null,
       pluginSources: () => ({ opencodePluginSource: '// opencode plugin source' }),
       warn: vi.fn(),
@@ -244,10 +251,10 @@ describe('WslHookRelayManager', () => {
     manager.ensureForDistro('Ubuntu')
     await vi.waitFor(() => expect(deps.installHooks).toHaveBeenCalledTimes(1))
     expect(deps.spawnRelay).toHaveBeenCalledTimes(1)
+    expect(deps.installCodex).toHaveBeenCalledWith(home, 'Ubuntu')
+    // Codex is owned by the canonical runtime-host writer, not the relay adapter.
     expect(deps.installHooks).toHaveBeenCalledWith(expect.anything(), home, {
-      agents: ['codex'],
-      codexHomeDir: `${home}/.local/share/orca/codex-runtime-home/home`,
-      deferTrustUntilConfigToml: true
+      agents: []
     })
 
     expect(manager.getGuestEndpointFilePath('Ubuntu')).toBe(

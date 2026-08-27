@@ -1492,7 +1492,13 @@ export class CodexHookService {
       options?.codexHomeDir?.replace(/\/$/, '') ?? `${remoteHome.replace(/\/$/, '')}/.codex`
     const remoteConfigPath = `${codexHomeBase}/hooks.json`
     const remoteTomlPath = `${codexHomeBase}/config.toml`
-    const remoteScriptPath = `${remoteHome.replace(/\/$/, '')}/.orca/agent-hooks/codex-hook.sh`
+    // Redirected WSL homes must use the same script location and command shape
+    // as the runtime installer; two representations of one hooks.json race
+    // into stale trust keys. Plain SSH keeps its guest-home script contract.
+    const redirectedCodexHome = options?.codexHomeDir?.replace(/\/$/, '')
+    const remoteScriptPath = redirectedCodexHome
+      ? `${redirectedCodexHome}/.orca/agent-hooks/codex-hook.sh`
+      : `${remoteHome.replace(/\/$/, '')}/.orca/agent-hooks/codex-hook.sh`
     try {
       const config = await readHooksJsonRemote(sftp, remoteConfigPath)
       if (!config) {
@@ -1505,7 +1511,9 @@ export class CodexHookService {
         }
       }
 
-      const command = wrapPosixHookCommand(remoteScriptPath)
+      const command = redirectedCodexHome
+        ? wrapReadablePosixHookCommand(remoteScriptPath)
+        : wrapPosixHookCommand(remoteScriptPath)
       const nextHooks = { ...config.hooks }
       const managedEvents = new Set<string>(CODEX_EVENTS)
       const isManagedCommand = createManagedCommandMatcher('codex-hook.sh')
@@ -1529,11 +1537,13 @@ export class CodexHookService {
         const definition: HookDefinition = {
           hooks: [buildManagedCommandHook(command)]
         }
-        nextHooks[eventName] = [...cleaned, definition]
+        nextHooks[eventName] = redirectedCodexHome
+          ? [definition, ...cleaned]
+          : [...cleaned, definition]
         trustEntries.push({
           sourcePath: remoteConfigPath,
           eventLabel: CODEX_EVENT_LABEL[eventName],
-          groupIndex: cleaned.length,
+          groupIndex: redirectedCodexHome ? 0 : cleaned.length,
           handlerIndex: 0,
           command,
           timeoutSec: MANAGED_HOOK_TIMEOUT_SECONDS

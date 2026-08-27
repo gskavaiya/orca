@@ -13,6 +13,8 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 
 import { AgentHookServer } from './server'
 import { WslHookRelayManager } from './wsl-hook-relay-manager'
+import { createManagedHookLocalFilesystem } from './managed-hook-local-filesystem'
+import { codexHookService } from '../codex/hook-service'
 import { wslCodexRuntimeHomeForGuestHome } from '../pty/codex-home-wsl-env'
 
 const BUNDLE_DIR = join(process.cwd(), 'out', 'relay', 'wsl')
@@ -102,6 +104,11 @@ describe.skipIf(process.platform === 'win32')(
             envelope as Parameters<AgentHookServer['ingestRemote']>[0],
             connectionId
           ),
+        installCodex: (guestHome) =>
+          codexHookService.installRemote(createManagedHookLocalFilesystem(), guestHome, {
+            codexHomeDir: wslCodexRuntimeHomeForGuestHome(guestHome),
+            deferTrustUntilConfigToml: true
+          }),
         managedHookSettings: () => ({
           agentCmdOverrides: {
             claude: process.execPath,
@@ -120,7 +127,10 @@ describe.skipIf(process.platform === 'win32')(
       await vi.waitFor(() => expect(existsSync(join(codexHome, 'hooks.json'))).toBe(true), {
         timeout: 15_000
       })
-      expect(existsSync(join(fakeHome, '.claude', 'settings.json'))).toBe(true)
+      await vi.waitFor(
+        () => expect(existsSync(join(fakeHome, '.claude', 'settings.json'))).toBe(true),
+        { timeout: 15_000 }
+      )
       const claudeScript = readFileSync(
         join(fakeHome, '.orca', 'agent-hooks', 'claude-hook.sh'),
         'utf8'

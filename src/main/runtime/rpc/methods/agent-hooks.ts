@@ -19,12 +19,12 @@ export const AGENT_HOOK_METHODS: readonly RpcMethod[] = [
   defineMethod({
     name: 'agentHooks.prepareCodexForWslPane',
     params: PrepareCodexForWslPaneParams,
-    handler: (params, { runtime, clientKind }) => {
+    handler: async (params, { runtime, clientKind }) => {
       if (clientKind !== undefined) {
         throw new Error('Codex hook preparation is only available to the local Orca CLI.')
       }
       const settings = runtime.getClientSettings()
-      return prepareManagedWslCodexHomeBeforeShellLaunch({
+      return await prepareManagedWslCodexHomeBeforeShellLaunch({
         env: {
           CODEX_HOME: params.codexHome,
           ORCA_CODEX_HOME: params.orcaCodexHome,

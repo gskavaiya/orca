@@ -179,7 +179,7 @@ describe('managed WSL Codex shell preflight', () => {
     })
   })
 
-  it('installs once through the WSL runtime-home lane while hooks are enabled', () => {
+  it('installs once through the WSL runtime-home lane while hooks are enabled', async () => {
     const status = {
       agent: 'codex' as const,
       state: 'installed' as const,
@@ -189,17 +189,17 @@ describe('managed WSL Codex shell preflight', () => {
     }
     const install = vi.fn(() => status)
 
-    expect(prepareManagedWslCodexHomeBeforeShellLaunch({ env, hooksEnabled: true, install })).toBe(
-      status
-    )
+    await expect(
+      prepareManagedWslCodexHomeBeforeShellLaunch({ env, hooksEnabled: true, install })
+    ).resolves.toBe(status)
     expect(install).toHaveBeenCalledExactlyOnceWith(
       '\\\\wsl.localhost\\Ubuntu-24.04\\home\\jin\\.local\\share\\orca\\codex-runtime-home\\home',
       { runtime: 'wsl', wslDistro: 'Ubuntu-24.04' }
     )
 
-    expect(
+    await expect(
       prepareManagedWslCodexHomeBeforeShellLaunch({ env, hooksEnabled: false, install })
-    ).toBeNull()
+    ).resolves.toBeNull()
     expect(install).toHaveBeenCalledTimes(1)
   })
 

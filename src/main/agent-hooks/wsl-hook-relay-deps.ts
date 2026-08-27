@@ -9,6 +9,10 @@ import { agentHookServer } from './server'
 import type { ManagedHookDetectionSettings } from './managed-hook-detection-commands'
 import { installRemoteManagedAgentHooks } from './remote-managed-hook-installers'
 import { getOpenCodePluginSource } from '../opencode/hook-service'
+import { codexHookService } from '../codex/hook-service'
+import { wslCodexRuntimeHomeForGuestHome } from '../pty/codex-home-wsl-env'
+import { toWindowsWslPath } from '../../shared/wsl-paths'
+import type { AgentHookInstallStatus } from '../../shared/agent-hook-types'
 import type { PluginSources } from '../../relay/plugin-overlay'
 import {
   isWslDistroRunning,
@@ -61,6 +65,7 @@ export type WslHookRelayManagerDeps = {
   waitForSentinel: typeof waitForWslRelaySentinel
   ingest: (envelope: Record<string, unknown>, connectionId: string) => void
   installHooks: typeof installRemoteManagedAgentHooks
+  installCodex: (guestHome: string, distro: string) => Promise<AgentHookInstallStatus | null>
   managedHookSettings: () => ManagedHookDetectionSettings
   /** Plugin source strings shipped to the guest relay so an Orca update needn't redeploy the relay bundle. */
   pluginSources: () => PluginSources
@@ -102,6 +107,11 @@ export const defaultWslHookRelayDeps: WslHookRelayManagerDeps = {
       connectionId
     ),
   installHooks: installRemoteManagedAgentHooks,
+  installCodex: (guestHome, distro) =>
+    codexHookService.installForRuntimeHome(
+      toWindowsWslPath(wslCodexRuntimeHomeForGuestHome(guestHome), distro),
+      { runtime: 'wsl', wslDistro: distro }
+    ),
   managedHookSettings: () => null,
   // Why: only OpenCode is in scope for WSL now; the payload shape stays identical to SSH so Pi/OMP are additive later.
   pluginSources: () => ({ opencodePluginSource: getOpenCodePluginSource() }),
