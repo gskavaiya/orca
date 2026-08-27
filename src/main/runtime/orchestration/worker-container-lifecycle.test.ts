@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -359,6 +359,50 @@ describe('worker container lifecycle adapter', () => {
         expect(existsSync(join(worker.lifecycle.directory, 'result.json'))).toBe(false)
         expect(db!.getUnreadMessages(`run:${worker.task.run_id}`, ['worker_done'])).toHaveLength(1)
         expect(notify).toHaveBeenCalledTimes(1)
+      } finally {
+        vi.useRealTimers()
+      }
+    }
+  )
+
+  it.runIf(process.platform !== 'win32')(
+    'quarantines a worker-controlled receipt symlink and admits a correction',
+    async () => {
+      vi.useFakeTimers()
+      try {
+        const worker = readyWorker()
+        const notify = vi.fn()
+        const targetPath = join(worker.lifecycle.directory, 'symlink-target.json')
+        writeFileSync(targetPath, '{}\n', { flag: 'wx', mode: 0o600 })
+        symlinkSync(targetPath, join(worker.lifecycle.directory, 'result.json'))
+
+        monitorWorkerContainerLifecycle({
+          db: db!,
+          runId: worker.task.run_id,
+          taskId: worker.task.id,
+          dispatchId: worker.dispatchId,
+          terminalHandle: 'term_worker',
+          lifecycle: worker.lifecycle,
+          notify
+        })
+
+        expect(existsSync(join(worker.lifecycle.directory, 'result.json'))).toBe(false)
+        expect(db!.getUnreadMessages(`run:${worker.task.run_id}`, ['escalation'])).toHaveLength(1)
+        expect(db!.getTask(worker.task.id)?.status).toBe('dispatched')
+
+        writeReceipt(worker.lifecycle, {
+          schemaVersion: 'worker_lifecycle_receipt/1',
+          dispatchId: worker.dispatchId,
+          lifecycleBinding: worker.lifecycle.binding,
+          type: 'worker_done',
+          outcome: 'succeeded',
+          subject: 'Corrected after symlink rejection',
+          body: 'The symlink did not block later lifecycle settlement.'
+        })
+        await vi.advanceTimersByTimeAsync(250)
+
+        expect(db!.getTask(worker.task.id)?.status).toBe('completed')
+        expect(db!.getUnreadMessages(`run:${worker.task.run_id}`, ['worker_done'])).toHaveLength(1)
       } finally {
         vi.useRealTimers()
       }

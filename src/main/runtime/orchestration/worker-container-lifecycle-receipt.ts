@@ -14,6 +14,13 @@ function unreadableReceiptError(error: unknown): Error {
   return new Error(`${UNREADABLE_RECEIPT_PREFIX}:${code}`)
 }
 
+function isInvalidReceiptError(error: unknown): boolean {
+  if (error instanceof Error && error.message === 'worker_lifecycle_receipt_invalid') {
+    return true
+  }
+  return Boolean(error && typeof error === 'object' && 'code' in error && error.code === 'ELOOP')
+}
+
 export function readBoundedWorkerLifecycleReceipt(path: string, maxBytes: number): string {
   let descriptor: number | undefined
   let failed = false
@@ -56,8 +63,8 @@ export function readBoundedWorkerLifecycleReceipt(path: string, maxBytes: number
       throw unreadableReceiptError(error)
     }
   }
-  if (failure instanceof Error && failure.message === 'worker_lifecycle_receipt_invalid') {
-    throw failure
+  if (isInvalidReceiptError(failure)) {
+    throw new Error('worker_lifecycle_receipt_invalid')
   }
   if (failed) {
     throw unreadableReceiptError(failure)
