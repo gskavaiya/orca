@@ -103,7 +103,10 @@ export class PaneAgentIdentityObservationAuthority {
     const hostKinds = uniqueHostKinds(context.hostKinds)
     const factsByHostKind = new Map<PaneAgentIdentityHostKind, PaneAgentIdentityEvidenceFact[]>()
     for (const hostKind of hostKinds) {
-      const facts: PaneAgentIdentityEvidenceFact[] = [{ source: 'launch', agent: owner, run }]
+      const facts: PaneAgentIdentityEvidenceFact[] = []
+      if (launchMode === 'orca-launch') {
+        facts.push({ source: 'launch', agent: owner, run })
+      }
       if (launchMode === 'resume') {
         facts.push({ source: 'sleeping-session', agent: owner, run })
       }
@@ -153,7 +156,8 @@ export class PaneAgentIdentityObservationAuthority {
     const candidate = {
       key: `${this.authorityId}:${context.ptyId}:${context.incarnationId ?? 'unknown'}:candidate`,
       ptyId: context.ptyId,
-      hostKind
+      hostKind,
+      agent
     }
     if (!this.scheduler.scheduleTitleCandidate(candidate.key, candidate.hostKind)) {
       this.sink.addCoverage(hostKind, 'overflow')
@@ -259,10 +263,18 @@ export class PaneAgentIdentityObservationAuthority {
   }
 
   private freezeCandidate(hostKind: PaneAgentIdentityHostKind, key: string): void {
-    this.sink.addCoverage(hostKind, 'candidate')
     const candidate = this.candidatesByKey.get(key)
     this.candidatesByKey.delete(key)
     const candidateState = candidate ? this.states.get(candidate.ptyId) : undefined
+    if (candidate) {
+      this.sink.record(
+        reducePaneAgentIdentityAvailability(candidate.hostKind, 'typed', {
+          facts: [{ source: 'title', agent: candidate.agent }]
+        })
+      )
+    } else {
+      this.sink.addCoverage(hostKind, 'candidate')
+    }
     if (candidateState) {
       candidateState.candidate = null
       candidateState.finalizedCandidateKey = key

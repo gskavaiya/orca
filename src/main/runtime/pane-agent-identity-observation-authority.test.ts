@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { PaneAgentIdentityAvailability } from '../../shared/pane-agent-identity-evidence'
-import { MAX_LIVE_FINALIZED_RUN_KEYS } from '../../shared/pane-agent-identity-availability'
+import {
+  aggregatePaneAgentIdentityAvailability,
+  MAX_LIVE_FINALIZED_RUN_KEYS
+} from '../../shared/pane-agent-identity-availability'
 import { PaneAgentIdentityObservationAuthority } from './pane-agent-identity-observation-authority'
 
 function createHarness() {
@@ -28,7 +31,7 @@ describe('PaneAgentIdentityObservationAuthority', () => {
     expect(records).toEqual([])
     vi.advanceTimersByTime(1)
     expect(records).toEqual([
-      expect.objectContaining({ hostKind: 'native', launchMode: 'typed', sourceMask: 4 })
+      expect.objectContaining({ hostKind: 'native', launchMode: 'typed', sourceMask: 0 })
     ])
 
     expect(authority.attestRun(context, 'typed', 'codex', 'typed:1')).toBe(true)
@@ -39,6 +42,35 @@ describe('PaneAgentIdentityObservationAuthority', () => {
     vi.advanceTimersByTime(5_000)
     expect(records).toHaveLength(2)
     authority.shutdown()
+  })
+
+  it('classifies typed runs with no evidence and title-only evidence', () => {
+    vi.useFakeTimers()
+    const { authority, records } = createHarness()
+    const noEvidence = {
+      ptyId: 'pty-no-evidence',
+      incarnationId: 'inc-1',
+      hostKinds: ['ssh'] as const
+    }
+    const titleOnly = {
+      ptyId: 'pty-title-only',
+      incarnationId: 'inc-1',
+      hostKinds: ['relay'] as const
+    }
+
+    authority.attestRun(noEvidence, 'typed', 'codex', 'typed:no-evidence')
+    authority.attestRun(titleOnly, 'typed', 'codex', 'typed:title-only')
+    authority.observeTitle(titleOnly, 'codex')
+    vi.advanceTimersByTime(5_000)
+
+    expect(records).toEqual([
+      expect.objectContaining({ hostKind: 'ssh', launchMode: 'typed', sourceMask: 0 }),
+      expect.objectContaining({ hostKind: 'relay', launchMode: 'typed', sourceMask: 64 })
+    ])
+    expect(records.map((row) => aggregatePaneAgentIdentityAvailability(row))).toEqual([
+      expect.objectContaining({ hostKind: 'ssh', noEvidence: 1, titleOnly: 0 }),
+      expect.objectContaining({ hostKind: 'relay', noEvidence: 0, titleOnly: 1 })
+    ])
   })
 
   it('publishes paired WSL facts with execution evidence only on the distro view', () => {
@@ -75,7 +107,7 @@ describe('PaneAgentIdentityObservationAuthority', () => {
     authority.attestRun(first, 'resume', 'claude', 'resume:1')
     authority.exitOrRebind(first.ptyId, first.incarnationId)
     expect(records).toEqual([
-      expect.objectContaining({ hostKind: 'ssh', launchMode: 'resume', sourceMask: 20 })
+      expect.objectContaining({ hostKind: 'ssh', launchMode: 'resume', sourceMask: 16 })
     ])
 
     authority.attestRun(second, 'typed', 'codex', 'typed:1')
@@ -87,23 +119,28 @@ describe('PaneAgentIdentityObservationAuthority', () => {
 
   it('records a title candidate only after its authority window and cancels it on attestation', () => {
     vi.useFakeTimers()
-    const { authority, coverage } = createHarness()
+    const { authority, records, coverage } = createHarness()
     const context = { ptyId: 'pty', incarnationId: 'inc-1', hostKinds: ['ssh'] as const }
     authority.observeTitle(context, 'codex')
     vi.advanceTimersByTime(29_999)
     expect(coverage).toEqual([])
     vi.advanceTimersByTime(1)
-    expect(coverage).toEqual([{ hostKind: 'ssh', reason: 'candidate', amount: 1 }])
+    expect(records).toEqual([
+      expect.objectContaining({ hostKind: 'ssh', launchMode: 'typed', sourceMask: 64 })
+    ])
+    expect(coverage).toEqual([])
 
     authority.exitOrRebind(context.ptyId, context.incarnationId)
     authority.observeTitle(context, 'codex')
     authority.attestRun(context, 'typed', 'codex', 'typed:1')
     vi.advanceTimersByTime(30_000)
-    expect(coverage).toHaveLength(1)
+    expect(records).toHaveLength(2)
+    expect(coverage).toHaveLength(0)
 
     authority.observeTitle(context, 'codex')
     vi.advanceTimersByTime(30_000)
-    expect(coverage).toHaveLength(1)
+    expect(records).toHaveLength(2)
+    expect(coverage).toHaveLength(0)
     authority.shutdown()
   })
 

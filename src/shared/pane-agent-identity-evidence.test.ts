@@ -113,7 +113,21 @@ describe('pane identity evidence census', () => {
       revision: 1,
       rows: [['relay', 'typed', 1, 1, 0, 1, 0] as const]
     }
-    expect(merger.merge('env', snapshot)).toEqual({ kind: 'baseline' })
+    expect(merger.merge('env', snapshot)).toMatchObject({
+      kind: 'baseline',
+      rows: [
+        {
+          hostKind: 'relay',
+          launchMode: 'typed',
+          attestedRuns: 1,
+          noEvidence: 1,
+          titleOnly: 0,
+          identityNull: 1,
+          ambiguousTopRank: 0
+        }
+      ],
+      candidateCoverage: []
+    })
     expect(merger.merge('env', { ...snapshot, revision: 0 })).toEqual({ kind: 'stale' })
     expect(
       merger.merge('env', {
@@ -123,15 +137,33 @@ describe('pane identity evidence census', () => {
       })
     ).toMatchObject({ kind: 'delta' })
     expect(merger.merge('env', { ...snapshot, revision: 3, epoch: 'new' })).toEqual({
-      kind: 'failed-closed',
-      reason: 'epoch-changed'
+      kind: 'delta',
+      rows: [
+        {
+          hostKind: 'relay',
+          launchMode: 'typed',
+          attestedRuns: 1,
+          noEvidence: 1,
+          titleOnly: 0,
+          identityNull: 1,
+          ambiguousTopRank: 0
+        }
+      ],
+      candidateCoverage: []
     })
+    expect(
+      merger.merge('env', {
+        epoch: 'new',
+        revision: 4,
+        rows: [['relay', 'typed', 2, 1, 0, 1, 0] as const]
+      })
+    ).toMatchObject({ kind: 'delta' })
   })
 
   it('fail-closes cumulative counter regressions without moving the baseline backward', () => {
     const merger = new PaneAgentIdentityRelaySnapshotMerger()
     const row = ['relay', 'typed', 5, 1, 0, 1, 0] as const
-    expect(merger.merge('env', { epoch: 'e', revision: 1, rows: [row] })).toEqual({
+    expect(merger.merge('env', { epoch: 'e', revision: 1, rows: [row] })).toMatchObject({
       kind: 'baseline'
     })
     expect(
@@ -158,7 +190,11 @@ describe('pane identity evidence census', () => {
       rows: [],
       candidateCoverage: [['relay', 2] as const]
     }
-    expect(merger.merge('env', baseline)).toEqual({ kind: 'baseline' })
+    expect(merger.merge('env', baseline)).toMatchObject({
+      kind: 'baseline',
+      rows: [],
+      candidateCoverage: [{ hostKind: 'relay', exposures: 2 }]
+    })
     expect(
       merger.merge('env', {
         ...baseline,

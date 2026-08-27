@@ -66,15 +66,15 @@ describe('runtime pane identity census wiring', () => {
 
     expect(record).toHaveBeenNthCalledWith(
       1,
-      expect.objectContaining({ hostKind: 'wsl-host', sourceMask: 4 })
+      expect.objectContaining({ hostKind: 'wsl-host', sourceMask: 0 })
     )
     expect(record).toHaveBeenNthCalledWith(
       2,
-      expect.objectContaining({ hostKind: 'wsl-distro', sourceMask: 4 })
+      expect.objectContaining({ hostKind: 'wsl-distro', sourceMask: 0 })
     )
     expect(census.snapshot().rows).toEqual([
-      ['wsl-host', 'typed', 1, 0, 0, 0, 0],
-      ['wsl-distro', 'typed', 1, 0, 0, 0, 0]
+      ['wsl-host', 'typed', 1, 1, 0, 1, 0],
+      ['wsl-distro', 'typed', 1, 1, 0, 1, 0]
     ])
     runtime.shutdownPaneAgentIdentityCensus(false)
   })
@@ -110,6 +110,25 @@ describe('runtime pane identity census wiring', () => {
     expect(await availabilityRows(runtime)).toEqual([
       expect.objectContaining({ hostKind: 'ssh', launchMode: 'typed', attestedRuns: 1 })
     ])
+    runtime.shutdownPaneAgentIdentityCensus(false)
+  })
+
+  it('records coverage when an SSH typed candidate expires without corroboration', async () => {
+    vi.useFakeTimers()
+    const census = new PaneAgentIdentityCensus({ emit: null })
+    const runtime = new OrcaRuntimeService(undefined, undefined, {
+      paneAgentIdentityCensus: census
+    })
+    runtime.registerPty('pty-ssh', 'folder:/tmp', 'ssh-1', {
+      tabId: '00000000-0000-4000-8000-000000000001',
+      leafId: '00000000-0000-4000-8000-000000000002',
+      incarnationId: 'incarnation-1'
+    })
+    runtime.observeAcceptedPtyWrite('pty-ssh', 'codex\r')
+
+    vi.advanceTimersByTime(30_000)
+
+    expect(census.snapshot().candidateCoverage).toEqual([['ssh', 1]])
     runtime.shutdownPaneAgentIdentityCensus(false)
   })
 
@@ -184,7 +203,7 @@ describe('runtime pane identity census wiring', () => {
     vi.advanceTimersByTime(5_000)
 
     expect(record).toHaveBeenCalledWith(
-      expect.objectContaining({ hostKind: 'wsl-distro', sourceMask: 5 })
+      expect.objectContaining({ hostKind: 'wsl-distro', sourceMask: 1 })
     )
     runtime.shutdownPaneAgentIdentityCensus(false)
   })
@@ -456,7 +475,7 @@ describe('runtime pane identity census wiring', () => {
     expect(record).toHaveBeenCalledWith({
       hostKind: 'native',
       launchMode: 'typed',
-      sourceMask: 79,
+      sourceMask: 75,
       identityNull: false,
       ambiguousTopRank: false
     })
@@ -482,7 +501,7 @@ describe('runtime pane identity census wiring', () => {
     runtime.shutdownPaneAgentIdentityCensus(false)
   })
 
-  it('publishes title-candidate coverage and freezes a run on production rebind', async () => {
+  it('publishes title-only availability and freezes a run on production rebind', async () => {
     vi.useFakeTimers()
     const runtime = new OrcaRuntimeService()
     const binding = {
@@ -493,8 +512,14 @@ describe('runtime pane identity census wiring', () => {
     runtime.registerPty('pty-title', 'folder:/tmp', null, binding)
     runtime.onPtyData('pty-title', '\x1b]0;Codex working\x07', Date.now())
     vi.advanceTimersByTime(30_000)
-    expect((await runtime.listTerminals()).agentIdentityAvailability?.candidateCoverage).toEqual([
-      ['native', 1]
+    expect(await availabilityRows(runtime)).toEqual([
+      expect.objectContaining({
+        hostKind: 'native',
+        launchMode: 'typed',
+        attestedRuns: 1,
+        noEvidence: 0,
+        titleOnly: 1
+      })
     ])
 
     runtime.registerPty('pty-rebind', 'folder:/tmp', null, binding)
@@ -504,7 +529,13 @@ describe('runtime pane identity census wiring', () => {
       incarnationId: 'incarnation-2'
     })
     expect(await availabilityRows(runtime)).toEqual([
-      expect.objectContaining({ hostKind: 'native', launchMode: 'typed', attestedRuns: 1 })
+      expect.objectContaining({
+        hostKind: 'native',
+        launchMode: 'typed',
+        attestedRuns: 2,
+        noEvidence: 1,
+        titleOnly: 1
+      })
     ])
     runtime.shutdownPaneAgentIdentityCensus(false)
   })

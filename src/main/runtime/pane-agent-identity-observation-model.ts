@@ -24,6 +24,7 @@ export type Candidate = {
   key: string
   ptyId: string
   hostKind: PaneAgentIdentityHostKind
+  agent: TuiAgent
 }
 
 export type PtyObservationState = {

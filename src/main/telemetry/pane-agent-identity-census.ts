@@ -98,7 +98,7 @@ export class PaneAgentIdentityCensus {
     if (result.kind !== 'unavailable') {
       this.addCoverage('relay', 'snapshot')
     }
-    if (result.kind === 'delta') {
+    if (result.kind === 'delta' || result.kind === 'baseline') {
       for (const row of result.rows) {
         // Apply cumulative deltas without reclassifying every run.
         const key = keyOf(row.hostKind, row.launchMode)
@@ -119,7 +119,8 @@ export class PaneAgentIdentityCensus {
       for (const candidate of result.candidateCoverage) {
         this.addTelemetryCoverage(candidate.hostKind, 'candidate', candidate.exposures)
       }
-    } else if (result.kind === 'baseline') {
+    }
+    if (result.kind === 'baseline') {
       this.addCoverage('relay', 'baseline')
     } else if (result.kind === 'failed-closed') {
       this.addCoverage(

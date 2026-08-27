@@ -89,7 +89,11 @@ export function aggregatePaneAgentIdentityAvailability(
 }
 
 export type RelayMergeResult =
-  | { kind: 'baseline' }
+  | {
+      kind: 'baseline'
+      rows: PaneAgentIdentityAggregate[]
+      candidateCoverage: PaneAgentIdentityCandidateCoverage[]
+    }
   | {
       kind: 'delta'
       rows: PaneAgentIdentityAggregate[]
@@ -165,14 +169,32 @@ export class PaneAgentIdentityRelaySnapshotMerger {
         failedClosedReason: null
       }
       this.states.set(environmentKey, state)
-      return { kind: 'baseline' }
+      return {
+        kind: 'baseline',
+        rows: decodedRows,
+        candidateCoverage: [...state.candidates].map(([hostKind, exposures]) => ({
+          hostKind,
+          exposures
+        }))
+      }
+    }
+    if (state.epoch !== snapshot.epoch) {
+      state.epoch = snapshot.epoch
+      state.revision = snapshot.revision
+      state.rows = new Map(decodedRows.map((row) => [rowKey(row), row]))
+      state.candidates = new Map((snapshot.candidateCoverage ?? []).map((row) => [row[0], row[1]]))
+      state.failedClosedReason = null
+      return {
+        kind: 'delta',
+        rows: decodedRows,
+        candidateCoverage: [...state.candidates].map(([hostKind, exposures]) => ({
+          hostKind,
+          exposures
+        }))
+      }
     }
     if (state.failedClosedReason) {
       return { kind: 'failed-closed', reason: state.failedClosedReason }
-    }
-    if (state.epoch !== snapshot.epoch) {
-      state.failedClosedReason = 'epoch-changed'
-      return { kind: 'failed-closed', reason: 'epoch-changed' }
     }
     if (snapshot.revision <= state.revision) {
       return { kind: 'stale' }
