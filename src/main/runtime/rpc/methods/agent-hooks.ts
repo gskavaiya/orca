@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { prepareManagedWslCodexHomeBeforeShellLaunch } from '../../../codex/managed-home-shell-preflight'
+import { prepareManagedWslCodexHomeBeforeShellLaunch } from '../../../codex/managed-wsl-home-shell-preflight'
 import { defineMethod, type RpcMethod } from '../core'
 
 const PrepareCodexForWslPaneParams = z

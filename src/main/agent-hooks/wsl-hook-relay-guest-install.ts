@@ -24,6 +24,7 @@ type GuestInstallState = {
   distro: string
   mux?: SshChannelMultiplexer
   guestHome?: string
+  codexHomePath?: string
   opencodeOverlayDir?: string
   lastInstallAt?: number
 }
@@ -38,6 +39,7 @@ export async function runWslRelayGuestInstall(
   await installWslGuestHooks({
     mux,
     guestHome,
+    codexHomePath: state.codexHomePath ?? null,
     distro: state.distro,
     installHooks: deps.installHooks,
     installCodex: deps.installCodex,

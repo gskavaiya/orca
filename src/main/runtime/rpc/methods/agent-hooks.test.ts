@@ -2,15 +2,23 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { OrcaRuntimeService } from '../../orca-runtime'
 import { isStreamingMethod, type RpcContext } from '../core'
 
-const { installForRuntimeHomeMock } = vi.hoisted(() => ({
-  installForRuntimeHomeMock: vi.fn()
+const { installForRuntimeHomeSerializedMock } = vi.hoisted(() => ({
+  installForRuntimeHomeSerializedMock: vi.fn()
 }))
 
 vi.mock('../../../codex/hook-service', () => ({
-  codexHookService: { installForRuntimeHome: installForRuntimeHomeMock }
+  codexHookService: { installForRuntimeHomeSerialized: installForRuntimeHomeSerializedMock }
 }))
 
 import { AGENT_HOOK_METHODS } from './agent-hooks'
+import {
+  _internals as managedWslHomeRegistryInternals,
+  recordManagedWslCodexHome
+} from '../../../codex/managed-wsl-codex-home-registry'
+
+const LINUX_HOME = '/home/jin/.local/share/orca/codex-runtime-home/home'
+const RUNTIME_HOME =
+  '\\\\wsl.localhost\\Ubuntu-24.04\\home\\jin\\.local\\share\\orca\\codex-runtime-home\\home'
 
 function prepareMethod() {
   const method = AGENT_HOOK_METHODS.find(
@@ -33,24 +41,26 @@ function runtimeWithSettings(enabled = true, disabledTuiAgents: string[] = []): 
 
 describe('agent hook RPC methods', () => {
   beforeEach(() => {
-    installForRuntimeHomeMock.mockReset()
+    installForRuntimeHomeSerializedMock.mockReset()
+    managedWslHomeRegistryInternals.clearRecordedManagedWslCodexHomes()
+    recordManagedWslCodexHome('Ubuntu-24.04', RUNTIME_HOME)
   })
 
   it('installs the pane-selected WSL home once and returns its status', async () => {
     const status = { agent: 'codex', state: 'installed' }
-    installForRuntimeHomeMock.mockResolvedValue(status)
+    installForRuntimeHomeSerializedMock.mockResolvedValue(status)
     const method = prepareMethod()
     const params = method.params!.parse({
-      codexHome: '/home/jin/.local/share/orca/codex-runtime-home/home',
-      orcaCodexHome: '/home/jin/.local/share/orca/codex-runtime-home/home',
+      codexHome: LINUX_HOME,
+      orcaCodexHome: LINUX_HOME,
       wslDistro: 'Ubuntu-24.04'
     })
 
     await expect(method.handler(params, { runtime: runtimeWithSettings() })).resolves.toBe(status)
-    expect(installForRuntimeHomeMock).toHaveBeenCalledExactlyOnceWith(
-      '\\\\wsl.localhost\\Ubuntu-24.04\\home\\jin\\.local\\share\\orca\\codex-runtime-home\\home',
-      { runtime: 'wsl', wslDistro: 'Ubuntu-24.04' }
-    )
+    expect(installForRuntimeHomeSerializedMock).toHaveBeenCalledExactlyOnceWith(RUNTIME_HOME, {
+      runtime: 'wsl',
+      wslDistro: 'Ubuntu-24.04'
+    })
   })
 
   it.each([
@@ -61,13 +71,13 @@ describe('agent hook RPC methods', () => {
     const params = method.params!.parse({
       codexHome: '/home/jin/.local/share/orca/codex-runtime-home/home',
       orcaCodexHome: '/home/jin/.local/share/orca/codex-runtime-home/home',
-      wslDistro: 'Ubuntu'
+      wslDistro: 'Ubuntu-24.04'
     })
 
     await expect(
       method.handler(params, { runtime: runtimeWithSettings(enabled, disabledTuiAgents) })
     ).resolves.toBeNull()
-    expect(installForRuntimeHomeMock).not.toHaveBeenCalled()
+    expect(installForRuntimeHomeSerializedMock).not.toHaveBeenCalled()
   })
 
   it('rejects non-local callers', async () => {
@@ -75,7 +85,7 @@ describe('agent hook RPC methods', () => {
     const params = method.params!.parse({
       codexHome: '/home/jin/.local/share/orca/codex-runtime-home/home',
       orcaCodexHome: '/home/jin/.local/share/orca/codex-runtime-home/home',
-      wslDistro: 'Ubuntu'
+      wslDistro: 'Ubuntu-24.04'
     })
 
     await expect(
@@ -84,22 +94,22 @@ describe('agent hook RPC methods', () => {
         clientKind: 'runtime'
       } as RpcContext)
     ).rejects.toThrow(/only available to the local Orca CLI/)
-    expect(installForRuntimeHomeMock).not.toHaveBeenCalled()
+    expect(installForRuntimeHomeSerializedMock).not.toHaveBeenCalled()
   })
 
   it('propagates an attempted installer failure', async () => {
-    installForRuntimeHomeMock.mockRejectedValue(new Error('install failed'))
+    installForRuntimeHomeSerializedMock.mockRejectedValue(new Error('install failed'))
     const method = prepareMethod()
     const params = method.params!.parse({
       codexHome: '/home/jin/.local/share/orca/codex-runtime-home/home',
       orcaCodexHome: '/home/jin/.local/share/orca/codex-runtime-home/home',
-      wslDistro: 'Ubuntu'
+      wslDistro: 'Ubuntu-24.04'
     })
 
     await expect(method.handler(params, { runtime: runtimeWithSettings() })).rejects.toThrow(
       'install failed'
     )
-    expect(installForRuntimeHomeMock).toHaveBeenCalledOnce()
+    expect(installForRuntimeHomeSerializedMock).toHaveBeenCalledOnce()
   })
 
   it('rejects malformed distro names at the RPC schema', () => {

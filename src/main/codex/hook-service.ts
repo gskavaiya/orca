@@ -1081,6 +1081,7 @@ export class CodexHookService {
   }
 
   private readonly wslReconciliationGeneration = new Map<string, number>()
+  private readonly wslInstallQueues = new Map<string, Promise<void>>()
 
   private supersedeWslReconciliation(runtimeHomePath: string | null | undefined): number {
     if (!runtimeHomePath) {
@@ -1175,6 +1176,31 @@ export class CodexHookService {
     } finally {
       markPrimaryInstallSettled()
     }
+  }
+
+  installForRuntimeHomeSerialized(
+    runtimeHomePath: string | null | undefined,
+    target?: CodexWslRuntimeHookTarget
+  ): Promise<AgentHookInstallStatus | null> {
+    if (!runtimeHomePath) {
+      return Promise.resolve(null)
+    }
+    const key = getWslReconciliationKey(runtimeHomePath)
+    const previous = this.wslInstallQueues.get(key) ?? Promise.resolve()
+    const install = previous
+      .catch(() => undefined)
+      .then(() => this.installForRuntimeHome(runtimeHomePath, target))
+    const settled = install.then(
+      () => undefined,
+      () => undefined
+    )
+    this.wslInstallQueues.set(key, settled)
+    void settled.then(() => {
+      if (this.wslInstallQueues.get(key) === settled) {
+        this.wslInstallQueues.delete(key)
+      }
+    })
+    return install
   }
 
   refreshRuntimeUserHooksForRuntimeHome(

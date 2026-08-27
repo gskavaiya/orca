@@ -4,10 +4,16 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   prepareManagedCodexHomeBeforeShellLaunch,
-  prepareManagedWslCodexHomeBeforeShellLaunch,
-  resolveManagedCodexShellPreflightHome,
-  resolveManagedWslCodexShellPreflightTarget
+  resolveManagedCodexShellPreflightHome
 } from './managed-home-shell-preflight'
+import {
+  prepareManagedWslCodexHomeBeforeShellLaunch,
+  resolveManagedWslCodexShellPreflightTarget
+} from './managed-wsl-home-shell-preflight'
+import {
+  _internals as managedWslHomeRegistryInternals,
+  recordManagedWslCodexHome
+} from './managed-wsl-codex-home-registry'
 
 const roots: string[] = []
 
@@ -18,6 +24,7 @@ function makeRoot(): string {
 }
 
 afterEach(() => {
+  managedWslHomeRegistryInternals.clearRecordedManagedWslCodexHomes()
   for (const root of roots.splice(0)) {
     rmSync(root, { recursive: true, force: true })
   }
@@ -165,6 +172,8 @@ describe('managed Codex shell preflight', () => {
 
 describe('managed WSL Codex shell preflight', () => {
   const home = '/home/jin/.local/share/orca/codex-runtime-home/home'
+  const runtimeHome =
+    '\\\\wsl.localhost\\Ubuntu-24.04\\home\\jin\\.local\\share\\orca\\codex-runtime-home\\home'
   const env = {
     CODEX_HOME: home,
     ORCA_CODEX_HOME: home,
@@ -172,14 +181,15 @@ describe('managed WSL Codex shell preflight', () => {
   }
 
   it('targets the pane-selected managed home through its UNC twin', () => {
+    recordManagedWslCodexHome('Ubuntu-24.04', runtimeHome)
     expect(resolveManagedWslCodexShellPreflightTarget(env)).toEqual({
-      runtimeHomePath:
-        '\\\\wsl.localhost\\Ubuntu-24.04\\home\\jin\\.local\\share\\orca\\codex-runtime-home\\home',
+      runtimeHomePath: runtimeHome,
       wslDistro: 'Ubuntu-24.04'
     })
   })
 
   it('installs once through the WSL runtime-home lane while hooks are enabled', async () => {
+    recordManagedWslCodexHome('Ubuntu-24.04', runtimeHome)
     const status = {
       agent: 'codex' as const,
       state: 'installed' as const,
@@ -192,10 +202,10 @@ describe('managed WSL Codex shell preflight', () => {
     await expect(
       prepareManagedWslCodexHomeBeforeShellLaunch({ env, hooksEnabled: true, install })
     ).resolves.toBe(status)
-    expect(install).toHaveBeenCalledExactlyOnceWith(
-      '\\\\wsl.localhost\\Ubuntu-24.04\\home\\jin\\.local\\share\\orca\\codex-runtime-home\\home',
-      { runtime: 'wsl', wslDistro: 'Ubuntu-24.04' }
-    )
+    expect(install).toHaveBeenCalledExactlyOnceWith(runtimeHome, {
+      runtime: 'wsl',
+      wslDistro: 'Ubuntu-24.04'
+    })
 
     await expect(
       prepareManagedWslCodexHomeBeforeShellLaunch({ env, hooksEnabled: false, install })
@@ -240,6 +250,36 @@ describe('managed WSL Codex shell preflight', () => {
       }
     ]
   ])('rejects %s', (_label, candidate) => {
+    recordManagedWslCodexHome('Ubuntu-24.04', runtimeHome)
     expect(resolveManagedWslCodexShellPreflightTarget(candidate)).toBeNull()
+  })
+
+  it('accepts only homes Orca issued and supports direct managed account homes', () => {
+    const directHome = '/home/jin/.local/share/orca/codex-accounts/account-1/home'
+    const directRuntimeHome =
+      '\\\\wsl$\\Ubuntu-24.04\\home\\jin\\.local\\share\\orca\\codex-accounts\\account-1\\home'
+    recordManagedWslCodexHome('Ubuntu-24.04', directRuntimeHome)
+
+    expect(
+      resolveManagedWslCodexShellPreflightTarget({
+        CODEX_HOME: directHome,
+        ORCA_CODEX_HOME: directHome,
+        WSL_DISTRO_NAME: 'ubuntu-24.04'
+      })
+    ).toEqual({ runtimeHomePath: directRuntimeHome, wslDistro: 'ubuntu-24.04' })
+    expect(resolveManagedWslCodexShellPreflightTarget(env)).toBeNull()
+  })
+
+  it('never authorizes a WSL system home even when it was offered by a PTY lane', () => {
+    const systemHome = '/home/jin/.codex'
+    recordManagedWslCodexHome('Ubuntu-24.04', '\\\\wsl.localhost\\Ubuntu-24.04\\home\\jin\\.codex')
+
+    expect(
+      resolveManagedWslCodexShellPreflightTarget({
+        CODEX_HOME: systemHome,
+        ORCA_CODEX_HOME: systemHome,
+        WSL_DISTRO_NAME: 'Ubuntu-24.04'
+      })
+    ).toBeNull()
   })
 })

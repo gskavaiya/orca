@@ -19,14 +19,16 @@ import type { AgentHookInstallStatus } from '../../shared/agent-hook-types'
 export async function installWslGuestHooks(options: {
   mux: SshChannelMultiplexer
   guestHome: string
+  codexHomePath: string | null
   distro: string
   installHooks: typeof installRemoteManagedAgentHooks
   settings: ManagedHookDetectionSettings
   warn: (message: string) => void
   /** Canonical runtime-host installer for redirected Codex homes. */
-  installCodex: (guestHome: string, distro: string) => Promise<AgentHookInstallStatus | null>
+  installCodex: (runtimeHomePath: string, distro: string) => Promise<AgentHookInstallStatus | null>
 }): Promise<void> {
-  const { mux, guestHome, distro, installHooks, settings, warn, installCodex } = options
+  const { mux, guestHome, codexHomePath, distro, installHooks, settings, warn, installCodex } =
+    options
   let agents
   try {
     const detected = (await mux.request('preflight.detectAgents', {
@@ -44,9 +46,9 @@ export async function installWslGuestHooks(options: {
   if (agents.length === 0) {
     return
   }
-  if (agents.includes('codex')) {
+  if (agents.includes('codex') && codexHomePath) {
     try {
-      const status = await installCodex(guestHome, distro)
+      const status = await installCodex(codexHomePath, distro)
       if (status?.state === 'error') {
         warn(
           `[agent-hooks] WSL Codex hook install for '${distro}' failed: ${status.detail ?? 'unknown error'}`
