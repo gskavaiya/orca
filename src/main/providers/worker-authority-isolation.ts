@@ -1,4 +1,3 @@
-import { randomBytes } from 'node:crypto'
 import {
   lstatSync,
   mkdirSync,
@@ -20,15 +19,17 @@ import {
 } from '../../shared/worker-authority-policy'
 import {
   WORKER_AUTHORITY_CID_FILE,
-  WORKER_AUTHORITY_DAEMON_OWNER_FILE,
   WORKER_AUTHORITY_DOCKER_PATH,
   WORKER_AUTHORITY_NONCE_LABEL,
-  WORKER_AUTHORITY_OWNERSHIP_FILE,
   WORKER_AUTHORITY_POLICY_LABEL,
   WORKER_AUTHORITY_ROOT_LABEL,
   WORKER_AUTHORITY_ROOT_PREFIX,
   type WorkerAuthorityDaemonOwner
 } from './worker-authority-container-contract'
+import {
+  assertWorkerAuthorityDaemonOwner,
+  createWorkerAuthorityOwnerRecords
+} from './worker-authority-daemon-owner'
 import {
   buildWorkerAuthorityContainerEnvironment,
   buildWorkerAuthorityHostEnvironment,
@@ -196,19 +197,7 @@ export function prepareWorkerAuthorityIsolation(args: {
 }): PreparedWorkerAuthorityIsolation {
   const platform = args.platform ?? process.platform
   assertSupportedRequest(args.request, args.agent, platform)
-  if (
-    args.owner.schemaVersion !== 'worker_authority_daemon_owner/1' ||
-    !Number.isSafeInteger(args.owner.pid) ||
-    args.owner.pid <= 0 ||
-    !Number.isFinite(args.owner.startedAtMs) ||
-    args.owner.startedAtMs <= 0 ||
-    !args.owner.launchNonce ||
-    !args.owner.socketPath ||
-    !args.owner.tokenPath ||
-    Boolean(args.owner.linuxStartTicks) !== Boolean(args.owner.bootId)
-  ) {
-    throw new Error('worker_authority_isolation_failed')
-  }
+  assertWorkerAuthorityDaemonOwner(args.owner)
   if (
     !args.command ||
     Buffer.byteLength(args.command) > 64 * 1024 ||
@@ -227,25 +216,13 @@ export function prepareWorkerAuthorityIsolation(args: {
   const isolationRoot = mkdtempSync(join(tempRoot, WORKER_AUTHORITY_ROOT_PREFIX))
   const isolatedHomePath = join(isolationRoot, 'home')
   const cidfilePath = join(isolationRoot, WORKER_AUTHORITY_CID_FILE)
-  const ownershipNonce = randomBytes(32).toString('hex')
   let cleanupPromise: Promise<void> | undefined
   try {
     const gitMetadataPaths = resolveWorkerAuthorityGitMetadataPaths(workspacePath)
     const gitConfigPaths = resolveWorkerAuthorityGitConfigPaths(gitMetadataPaths)
     assertNoCredentialBearingGitRemote(gitMetadataPaths)
     mkdirSync(isolatedHomePath, { mode: 0o700 })
-    writeFileSync(join(isolationRoot, WORKER_AUTHORITY_OWNERSHIP_FILE), ownershipNonce, {
-      mode: 0o600,
-      flag: 'wx'
-    })
-    writeFileSync(
-      join(isolationRoot, WORKER_AUTHORITY_DAEMON_OWNER_FILE),
-      JSON.stringify(args.owner),
-      {
-        mode: 0o600,
-        flag: 'wx'
-      }
-    )
+    const ownershipNonce = createWorkerAuthorityOwnerRecords({ isolationRoot, owner: args.owner })
     const sanitizedGitConfigPath = join(isolationRoot, 'git-config')
     writeFileSync(sanitizedGitConfigPath, '', { mode: 0o600, flag: 'wx' })
     for (const path of ['.codex', '.config/gh', '.cache']) {
