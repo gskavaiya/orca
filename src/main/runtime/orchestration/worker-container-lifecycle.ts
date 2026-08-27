@@ -199,15 +199,20 @@ export function monitorWorkerContainerLifecycle(
   args: Parameters<typeof admitWorkerContainerLifecycleReceipt>[0]
 ): void {
   const deadline = Date.now() + LIFECYCLE_MONITOR_MS
+  let unreadableWarningEmitted = false
   const poll = (): boolean => {
     try {
       return admitWorkerContainerLifecycleReceipt(args) === 'settled'
     } catch (error) {
       if (isWorkerLifecycleReceiptUnreadable(error)) {
-        console.warn(
-          `[orchestration] retrying unreadable container lifecycle receipt for ${args.dispatchId}`,
-          error.message
-        )
+        if (!unreadableWarningEmitted) {
+          console.warn(
+            '[orchestration] retrying unreadable receipt',
+            args.dispatchId,
+            error.message
+          )
+        }
+        unreadableWarningEmitted = true
         return false
       }
       console.warn(
