@@ -1,9 +1,24 @@
+import {
+  isWorkerStartTimeoutWithinTimerLimit,
+  resolveWorkerStartReadinessTimeoutMs
+} from '../../../../shared/orchestration-timing-budgets'
 import type { TuiAgent } from '../../../../shared/tui-agent'
 import type { WorkerAuthorityPolicyCapability } from '../../../../shared/worker-authority-policy'
 import type { OrcaRuntimeService } from '../../orca-runtime'
 import { buildDispatchPreamble } from '../../orchestration/preamble'
+import { OrchestrationError } from '../../orchestration/orchestration-error'
 import type { WorkerStartInput } from './orchestration-worker-start-schema'
 import type { WorkerEffect, WorkerSetupReceipt } from './orchestration-worker-topology'
+
+export function resolveWorkerStartTimeoutMs(timeoutMs: number | undefined): number {
+  if (!isWorkerStartTimeoutWithinTimerLimit(timeoutMs)) {
+    throw new OrchestrationError(
+      'invalid_argument',
+      '--timeout-ms is too large for worker-start transport grace; the derived timeout must fit within the timer limit.'
+    )
+  }
+  return resolveWorkerStartReadinessTimeoutMs(timeoutMs)
+}
 
 export function buildWorkerStartOptions(args: {
   params: WorkerStartInput
@@ -14,6 +29,7 @@ export function buildWorkerStartOptions(args: {
   agent: TuiAgent | undefined
   launchReceipt: unknown
   authorityCapability: WorkerAuthorityPolicyCapability | undefined
+  readinessTimeoutMs: number
 }) {
   return {
     worktree: args.requestedWorktree,
@@ -24,7 +40,7 @@ export function buildWorkerStartOptions(args: {
     terminal: args.params.terminal ?? null,
     agent: args.agent ?? null,
     launch: args.launchReceipt,
-    timeoutMs: args.params.timeoutMs ?? 60_000,
+    timeoutMs: args.readinessTimeoutMs,
     setup: args.createsWorktree
       ? (args.params.setup ?? 'run')
       : (args.params.setup ?? 'not_applicable'),

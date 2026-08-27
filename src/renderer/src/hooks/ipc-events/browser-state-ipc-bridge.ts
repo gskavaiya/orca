@@ -1,4 +1,6 @@
+import { toast } from 'sonner'
 import { rememberLiveBrowserUrl } from '@/components/browser-pane/describe-page/live-browser-url-registry'
+import { translate } from '@/i18n/i18n'
 import { getRuntimeEnvironmentIdForWorktree } from '@/lib/worktree-runtime-owner'
 import { redactKagiSessionToken } from '../../../../shared/browser-url'
 import { useAppStore } from '../../store'
@@ -89,7 +91,47 @@ export function registerBrowserStateIpcBridge(
       if (!sourcePage || getRuntimeEnvironmentIdForWorktree(store, sourcePage.worktreeId)) {
         return
       }
-      store.createBrowserTab(sourcePage.worktreeId, url, { title: url })
+      // Why: the link inherits the opener's cookie jar. Falling back to the default profile would let
+      // a page in an isolated session hand its links to the default one, silently crossing profiles.
+      const sourceTab = (store.browserTabsByWorktree[sourcePage.worktreeId] ?? []).find(
+        (tab) => tab.id === sourcePage.workspaceId
+      )
+      store.createBrowserTab(sourcePage.worktreeId, url, {
+        title: url,
+        ...(sourceTab
+          ? {
+              sessionProfileId: sourceTab.sessionProfileId,
+              sessionPartition: sourceTab.sessionPartition
+            }
+          : {})
+      })
     })
   )
+  // Why: the doc-preview scheme is desktop-only, so hosts without it (web client) simply have no channel.
+  if (typeof window.api.docPreview?.onExternalLink === 'function') {
+    unsubs.push(
+      window.api.docPreview.onExternalLink(({ url }) => {
+        // Why: an external link in a doc preview leaves the preview entirely — it becomes a normal
+        // browser tab through the same path as any other new tab, local or paired.
+        // Why: the click already left the preview, so a refused tab is a dead end unless it says so.
+        const reportLinkFailure = (): void => {
+          toast.error(
+            translate(
+              'auto.hooks.ipc.events.browserStateIpcBridge.docPreviewLinkFailed',
+              'Could not open this link in Orca Browser.'
+            )
+          )
+        }
+        void useAppStore
+          .getState()
+          .openBrowserProfileTabInActiveWorkspace(url, null)
+          .then((opened) => {
+            if (!opened) {
+              reportLinkFailure()
+            }
+          })
+          .catch(reportLinkFailure)
+      })
+    )
+  }
 }

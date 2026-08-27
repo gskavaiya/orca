@@ -28,6 +28,7 @@ import {
 import {
   buildInitialWorkerPlacementReceipt,
   buildWorkerStartOptions,
+  resolveWorkerStartTimeoutMs,
   sendWorkerDispatchInput
 } from './orchestration-worker-start-record'
 import { resolveLocalWorkerPlacement } from './orchestration-worker-placement-resolution'
@@ -40,6 +41,7 @@ export const ORCHESTRATION_WORKER_START_METHODS: RpcMethod[] = [
       params,
       { runtime, orchestrationMutation, orchestrationCompatibilityEvidence }
     ) => {
+      const readinessTimeoutMs = resolveWorkerStartTimeoutMs(params.timeoutMs)
       const db = runtime.getOrchestrationDb()
       // Why: worker-start was the only Run-scoped verb that skipped this, so a
       // declared --from could name someone else's pane and inherit their depth.
@@ -115,7 +117,8 @@ export const ORCHESTRATION_WORKER_START_METHODS: RpcMethod[] = [
         createsWorktree,
         agent,
         launchReceipt: launch.receipt,
-        authorityCapability
+        authorityCapability,
+        readinessTimeoutMs
       })
       const started = db.createStartingWorkerDispatch({
         creator: resolveDispatchCreator(runtime, params.from),
@@ -206,7 +209,7 @@ export const ORCHESTRATION_WORKER_START_METHODS: RpcMethod[] = [
         failedStage = 'agent_readiness'
         const wait = await runtime.waitForTerminal(terminalHandle, {
           condition: 'tui-idle',
-          timeoutMs: params.timeoutMs ?? 60_000
+          timeoutMs: readinessTimeoutMs
         })
         persistWorkerSetupWaitOutcome({ ...setupStage, wait })
         if (!wait.satisfied) {
@@ -284,7 +287,7 @@ export const ORCHESTRATION_WORKER_START_METHODS: RpcMethod[] = [
           stage: worker.stage,
           setup: setupReceipt,
           launch: launch.receipt,
-          timeoutMs: params.timeoutMs ?? 60_000,
+          timeoutMs: readinessTimeoutMs,
           effects,
           residualResources: [],
           ...(authorityAttestation ? { authorityIsolation: authorityAttestation } : {}),
