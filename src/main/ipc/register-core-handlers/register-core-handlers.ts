@@ -189,7 +189,7 @@ export function registerCoreHandlers(
   if (pluginService) {
     registerPluginHandlers(store, pluginService, runtime, marketplaceServices)
   }
-  registerTelemetryHandlers(store)
+  registerTelemetryHandlers(store, runtime.getPaneAgentIdentityCensus())
   registerOrcaProfileHandlers(store, {
     onBeforeRelaunch: lifecycleOptions.onBeforeRelaunch,
     onAuthMutation: lifecycleOptions.onOrcaProfileAuthMutation,

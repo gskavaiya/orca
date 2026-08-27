@@ -4,7 +4,6 @@ import type { AgentType } from '../../../../../shared/agent-status-types'
 import { AGENT_INTERRUPT_SETTLE_MS } from '../../../../../shared/agent-interrupt-intent'
 import { resolvePaneAgentOwner } from '../../../../../shared/pane-agent-owner'
 
-import { MANUAL_AGENT_COMMAND_MAX_CHARS } from './pty-connect-limits'
 import {
   CURSOR_AGENT_REATTACH_HEADER,
   terminalOwnsDomFocus,
@@ -34,62 +33,10 @@ export function installShellCommandInference(session: ConnectPanePtySession): vo
       session.resetPendingShellCommandLine()
       return
     }
-    if (session.shellCommandInferenceSuspendedUntilCommandEnd) {
-      if (data.includes('\x03') || data.includes('\x15')) {
-        session.shellCommandInferenceSuspendedUntilCommandEnd = false
-        session.resetPendingShellCommandLine()
-      }
-      if (data.includes('\r') || data.includes('\n')) {
-        session.shellCommandInferenceSuspendedUntilCommandEnd = false
-      }
-      return
-    }
-    if (data.length > MANUAL_AGENT_COMMAND_MAX_CHARS) {
-      session.resetPendingShellCommandLine()
-      session.shellCommandInferenceSuspendedUntilCommandEnd =
-        !data.includes('\r') && !data.includes('\n')
-      return
-    }
-    for (let index = 0; index < data.length; index += 1) {
-      const char = data[index]!
-      if (char === '\r' || char === '\n') {
-        session.shellCommandInferenceSuspendedUntilCommandEnd = false
-        session.rememberCommandInferredPaneAgent()
-        if (session.commandInferredPaneAgent) {
-          return
-        }
-        continue
-      }
-      if (char === '\x7f' || char === '\b') {
-        session.deletePendingShellCommandCharacter()
-        continue
-      }
-      if (char === '\x17') {
-        session.deletePendingShellCommandWord()
-        continue
-      }
-      if (char === '\x03' || char === '\x15') {
-        session.resetPendingShellCommandLine()
-        continue
-      }
-      if (char === '\x1b') {
-        const nextIndex = session.consumeShellCommandCsiSequence(data, index)
-        if (nextIndex !== null) {
-          index = nextIndex - 1
-          continue
-        }
-        session.resetPendingShellCommandLine()
-        continue
-      }
-      if (char < ' ') {
-        session.resetPendingShellCommandLine()
-        continue
-      }
-      if (char >= ' ') {
-        session.appendPendingShellCommandInput(char)
-        if (session.shellCommandInferenceSuspendedUntilCommandEnd) {
-          return
-        }
+    for (const candidate of session.manualAgentCommandTracker.ingest(data)) {
+      session.rememberCommandInferredPaneAgent(candidate)
+      if (session.commandInferredPaneAgent) {
+        return
       }
     }
   }

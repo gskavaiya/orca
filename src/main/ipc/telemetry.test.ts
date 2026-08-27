@@ -40,6 +40,7 @@ vi.mock('../telemetry/onboarding-cohort-classifier', () => ({
 }))
 
 import { _resetStoreForTests, registerTelemetryHandlers } from './telemetry'
+import { PaneAgentIdentityCensus } from '../telemetry/pane-agent-identity-census'
 
 function captureHandlers(): void {
   handlers.clear()
@@ -71,7 +72,7 @@ function makeFakeStore(telemetry: GlobalSettings['telemetry']): {
 
 function registerWith(telemetry: GlobalSettings['telemetry']): FakeStoreState {
   const { store, state } = makeFakeStore(telemetry)
-  registerTelemetryHandlers(store)
+  registerTelemetryHandlers(store, new PaneAgentIdentityCensus({ emit: null }))
   captureHandlers()
   return state
 }
@@ -161,8 +162,36 @@ describe('telemetry IPC handlers', () => {
       bucket_source: 'crossed_now'
     })
     handler({}, 'daemon_audit_eligibility', {})
+    handler({}, 'pane_agent_identity_availability', { rows: [] })
     expect(trackMock).not.toHaveBeenCalled()
     expect(getCohortAtEmitMock).not.toHaveBeenCalled()
+  })
+
+  it('accepts identity availability only through the dedicated validated ingestion path', () => {
+    const census = new PaneAgentIdentityCensus({ emit: null })
+    const ingest = vi.spyOn(census, 'ingestRelaySnapshot')
+    const { store } = makeFakeStore({
+      installId: 'x',
+      existedBeforeTelemetryRelease: false,
+      optedIn: true
+    })
+    registerTelemetryHandlers(store, census)
+    captureHandlers()
+
+    handlers.get('telemetry:ingestPaneAgentIdentityAvailability')!(
+      {},
+      {
+        environmentKey: 'relay-1',
+        snapshot: { epoch: 'epoch-1', revision: 1, rows: [] }
+      }
+    )
+
+    expect(ingest).toHaveBeenCalledWith('relay-1', {
+      epoch: 'epoch-1',
+      revision: 1,
+      rows: []
+    })
+    expect(trackMock).not.toHaveBeenCalled()
   })
 
   it('injects cohort for setup script prompt events', () => {

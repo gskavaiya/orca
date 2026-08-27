@@ -140,6 +140,8 @@ async function startOrcadRuntime(
   const { resolveAdvertisedPairingEndpoint } = await import('../runtime/pairing-endpoint')
   const { ServeReadinessPublisher } = await import('../server/serve-readiness')
   const { Store } = await import('../persistence/loading-store/store')
+  const { createHeadlessPaneAgentIdentityCensus } =
+    await import('../telemetry/pane-agent-identity-census-composition')
   const { ensureActiveOrcaProfile, initOrcaProfilePaths } =
     await import('../orca-profiles/profile-index-store')
   const { initSshHostKeyStoreFile } = await import('../ssh/ssh-host-key-store')
@@ -165,7 +167,9 @@ async function startOrcadRuntime(
   // registerPtyHandlers so the IPC layer routes through the daemon from the first call.
   await startOrcadDaemon()
 
+  const paneAgentIdentityCensus = createHeadlessPaneAgentIdentityCensus()
   const runtime = new OrcaRuntimeService(store, undefined, {
+    paneAgentIdentityCensus,
     // Why lazy: a daemon swap replaces the provider after construction, so an eager
     // reference would freeze the pre-daemon one.
     getLocalProvider: () => getLocalPtyProvider(),
@@ -265,6 +269,9 @@ async function startOrcadRuntime(
       try {
         await rpc.stop()
       } finally {
+        // Why the census first: it reads runtime state, so it must settle before the daemon
+        // link goes away.
+        runtime.shutdownPaneAgentIdentityCensus(false)
         // Why disconnect and not shut down: the daemon must outlive this process, or an
         // orcad restart goes back to killing every running terminal. See
         // orcad-daemon-supervision.ts.

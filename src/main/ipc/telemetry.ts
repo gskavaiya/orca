@@ -18,6 +18,9 @@ import { resolveConsent, type ConsentState } from '../telemetry/consent'
 import type { Store } from '../persistence'
 import { isCohortExtendedEvent, isOnboardingEvent } from '../../shared/telemetry-events'
 import type { EventName, EventProps, OptInVia } from '../../shared/telemetry-events'
+import type { PaneAgentIdentityCensus } from '../telemetry/pane-agent-identity-census'
+import type { PaneAgentIdentityAvailabilitySnapshot } from '../../shared/pane-agent-identity-availability'
+import { isPaneAgentIdentityAvailabilitySnapshot } from '../../shared/pane-agent-identity-availability-validator'
 
 // Module-level store ref: handlers need a synchronous `settings.telemetry` read to derive `via` before any mutation.
 let storeRef: Store | null = null
@@ -25,6 +28,7 @@ let storeRef: Store | null = null
 const MAIN_OWNED_TELEMETRY_EVENTS = new Set<EventName>([
   'app_starred_orca',
   'daemon_audit_eligibility',
+  'pane_agent_identity_availability',
   'star_nag_outcome',
   'feature_interaction_usage_bucket_reached'
 ])
@@ -49,7 +53,10 @@ function deriveOptInVia(store: Store, incomingOptedIn: boolean): OptInVia {
   return 'settings'
 }
 
-export function registerTelemetryHandlers(store: Store): void {
+export function registerTelemetryHandlers(
+  store: Store,
+  paneIdentityCensus: PaneAgentIdentityCensus
+): void {
   storeRef = store
 
   ipcMain.handle('telemetry:track', (_event, name: unknown, props: unknown): void => {
@@ -77,6 +84,34 @@ export function registerTelemetryHandlers(store: Store): void {
     // Casts are pass-through only; `track()`'s validator is the single runtime enforcement point, not these casts.
     track(eventName, finalProps as EventProps<EventName>)
   })
+
+  ipcMain.handle(
+    'telemetry:ingestPaneAgentIdentityAvailability',
+    (_event, payload: unknown): void => {
+      const environmentKey =
+        payload && typeof payload === 'object'
+          ? (payload as { environmentKey?: unknown }).environmentKey
+          : undefined
+      const snapshot =
+        payload && typeof payload === 'object'
+          ? (payload as { snapshot?: unknown }).snapshot
+          : undefined
+      if (
+        typeof environmentKey !== 'string' ||
+        environmentKey.length === 0 ||
+        environmentKey.length > 256
+      ) {
+        return
+      }
+      if (snapshot !== undefined && !isPaneAgentIdentityAvailabilitySnapshot(snapshot)) {
+        return
+      }
+      paneIdentityCensus.ingestRelaySnapshot(
+        environmentKey,
+        snapshot as PaneAgentIdentityAvailabilitySnapshot | undefined
+      )
+    }
+  )
 
   ipcMain.handle('telemetry:setOptIn', (_event, optedIn: unknown): Promise<void> | void => {
     // Strict input typing — renderer can pass anything over IPC.

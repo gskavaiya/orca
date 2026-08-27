@@ -78,6 +78,7 @@ export async function commitPtyIpcSpawn(ctx: PtyIpcSpawnState): Promise<PtySpawn
       spawnEnv: ctx.spawnEnv,
       launchAgent: args.launchAgent,
       launchConfig: ctx.effectiveLaunchConfig,
+      resumeProviderSession: args.resumeProviderSession,
       isReattach: ctx.result.isReattach === true,
       hasStablePaneOwner: ctx.stablePaneOwner !== null,
       incarnationId: ctx.result.incarnationId

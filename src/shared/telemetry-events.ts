@@ -1351,6 +1351,45 @@ const terminalPaneSplitSchema = z
   })
   .strict()
 
+const paneAgentIdentityHostKindSchema = z.enum(['native', 'wsl-host', 'wsl-distro', 'ssh', 'relay'])
+const paneAgentIdentityLaunchModeSchema = z.enum(['typed', 'orca-launch', 'resume'])
+const paneAgentIdentityAggregateRowSchema = z
+  .object({
+    kind: z.literal('aggregate'),
+    host_kind: paneAgentIdentityHostKindSchema,
+    launch_mode: paneAgentIdentityLaunchModeSchema,
+    attested_runs: z.number().int().min(1).max(1_000_000_000),
+    no_evidence: z.number().int().min(0).max(1_000_000_000),
+    title_only: z.number().int().min(0).max(1_000_000_000),
+    identity_null: z.number().int().min(0).max(1_000_000_000),
+    ambiguous_top_rank: z.number().int().min(0).max(1_000_000_000)
+  })
+  .strict()
+const paneAgentIdentityCoverageRowSchema = z
+  .object({
+    kind: z.literal('coverage'),
+    host_kind: paneAgentIdentityHostKindSchema,
+    reason: z.enum([
+      'snapshot',
+      'baseline',
+      'epoch_changed',
+      'counter_regressed',
+      'capacity',
+      'candidate',
+      'overflow',
+      'truncated'
+    ]),
+    count: z.number().int().min(1).max(1_000_000_000)
+  })
+  .strict()
+const paneAgentIdentityAvailabilitySchema = z
+  .object({
+    rows: z
+      .array(z.union([paneAgentIdentityAggregateRowSchema, paneAgentIdentityCoverageRowSchema]))
+      .max(64)
+  })
+  .strict()
+
 // Why: measures the changed-on-disk conflict flow (issue #7265) per transport; deliberately path-free.
 const editorExternalChangeConflictShownSchema = z
   .object({
@@ -1518,6 +1557,7 @@ export const eventSchemas = {
   editor_external_change_conflict_action: editorExternalChangeConflictActionSchema,
 
   direct_ssh_reconnect_operation: directSshReconnectOperationSchema,
+  pane_agent_identity_availability: paneAgentIdentityAvailabilitySchema,
 
   smart_sort_class_distribution: smartSortClassDistributionSchema,
   smart_sort_class_1_promotion: smartSortClass1PromotionSchema,

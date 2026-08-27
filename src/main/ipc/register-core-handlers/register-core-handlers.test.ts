@@ -458,7 +458,12 @@ describe('registerCoreHandlers', () => {
 
   it('passes the store through to handler registrars that need it', async () => {
     const store = { marker: 'store' }
-    const runtime = { marker: 'runtime', getAgentBrowserBridge: () => null }
+    const paneAgentIdentityCensus = { marker: 'paneAgentIdentityCensus' }
+    const runtime = {
+      marker: 'runtime',
+      getAgentBrowserBridge: () => null,
+      getPaneAgentIdentityCensus: () => paneAgentIdentityCensus
+    }
     const stats = { marker: 'stats' }
     const claudeUsage = { marker: 'claudeUsage' }
     const codexUsage = { marker: 'codexUsage' }
@@ -539,7 +544,7 @@ describe('registerCoreHandlers', () => {
     expect(registerWorkspaceSpaceHandlersMock).toHaveBeenCalledWith(store)
     expect(registerWorkspacePortHandlersMock).toHaveBeenCalledWith(store)
     expect(registerLocalhostWorktreeLabelHandlersMock).toHaveBeenCalledWith(store)
-    expect(registerTelemetryHandlersMock).toHaveBeenCalledWith(store)
+    expect(registerTelemetryHandlersMock).toHaveBeenCalledWith(store, paneAgentIdentityCensus)
     expect(registerOrcaProfileHandlersMock).toHaveBeenCalledWith(store, { onBeforeRelaunch })
     expect(registerSessionHandlersMock).toHaveBeenCalledWith(store)
     expect(registerUIHandlersMock).toHaveBeenCalledWith(store, {

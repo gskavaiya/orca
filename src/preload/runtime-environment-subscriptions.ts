@@ -1,4 +1,5 @@
 import type { RuntimeRpcResponse } from '../shared/runtime-rpc-envelope'
+import { isPaneAgentIdentityAvailabilitySnapshot } from '../shared/pane-agent-identity-availability-validator'
 
 type RuntimeEnvironmentSubscribeArgs = {
   selector: string
@@ -38,6 +39,8 @@ type RuntimeEnvironmentSubscriptionIpc = {
   ) => void
 }
 
+type RuntimeEnvironmentTerminalListObserverIpc = Pick<RuntimeEnvironmentSubscriptionIpc, 'invoke'>
+
 const SUBSCRIPTION_EVENT_CHANNEL = 'runtimeEnvironments:subscriptionEvent'
 
 // Why: each subscribe() previously attached its own channel listener that the
@@ -54,6 +57,28 @@ const subscriptionDispatchers = new WeakMap<
   RuntimeEnvironmentSubscriptionIpc,
   RuntimeEnvironmentSubscriptionDispatcher
 >()
+
+export function observeRuntimeEnvironmentTerminalListResponse(
+  ipc: RuntimeEnvironmentTerminalListObserverIpc,
+  args: Pick<RuntimeEnvironmentSubscribeArgs, 'selector' | 'method'>,
+  response: RuntimeRpcResponse<unknown>
+): void {
+  if (args.method !== 'terminal.list' || !response.ok || !response.result) {
+    return
+  }
+  if (typeof response.result !== 'object') {
+    return
+  }
+  const snapshot = (response.result as { agentIdentityAvailability?: unknown })
+    .agentIdentityAvailability
+  if (snapshot === undefined || !isPaneAgentIdentityAvailabilitySnapshot(snapshot)) {
+    return
+  }
+  void ipc.invoke('telemetry:ingestPaneAgentIdentityAvailability', {
+    environmentKey: args.selector,
+    snapshot
+  })
+}
 
 function releaseIdleDispatcher(
   ipc: RuntimeEnvironmentSubscriptionIpc,
@@ -132,7 +157,17 @@ export async function subscribeRuntimeEnvironmentFromPreload(
   // Why: streaming RPCs can emit their first frame before ipcMain.handle()
   // resolves, so the dispatcher must be routing this id before invoking.
   const dispatcher = getOrCreateDispatcher(ipc)
-  dispatcher.callbacks.set(subscriptionId, callbacks)
+  const observedCallbacks =
+    args.method === 'terminal.list'
+      ? {
+          ...callbacks,
+          onResponse: (response: RuntimeRpcResponse<unknown>): void => {
+            observeRuntimeEnvironmentTerminalListResponse(ipc, args, response)
+            callbacks.onResponse(response)
+          }
+        }
+      : callbacks
+  dispatcher.callbacks.set(subscriptionId, observedCallbacks)
   const releaseCurrentSubscription = (): void => {
     releaseSubscription(ipc, dispatcher, subscriptionId)
   }

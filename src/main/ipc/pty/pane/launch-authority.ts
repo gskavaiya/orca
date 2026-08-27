@@ -10,10 +10,15 @@ export function admitRendererAgentLaunchAuthority(args: {
   spawnEnv: Record<string, string> | undefined
   launchAgent: unknown
   launchConfig: SleepingAgentLaunchConfig | undefined
+  resumeProviderSession: unknown
   isReattach: boolean
   hasStablePaneOwner: boolean
   incarnationId: unknown
-}): { launchToken: string; launchAgent: TuiAgent } | null {
+}): {
+  launchToken: string
+  launchAgent: TuiAgent
+  launchMode: 'orca-launch' | 'resume'
+} | null {
   if (
     args.isReattach ||
     args.hasStablePaneOwner ||
@@ -27,7 +32,11 @@ export function admitRendererAgentLaunchAuthority(args: {
   ) {
     return null
   }
-  return { launchToken: args.launchToken, launchAgent: args.launchAgent }
+  return {
+    launchToken: args.launchToken,
+    launchAgent: args.launchAgent,
+    launchMode: args.resumeProviderSession ? 'resume' : 'orca-launch'
+  }
 }
 
 export function shouldRefreshNativeClaudeAgentTeamsEnv(args: {

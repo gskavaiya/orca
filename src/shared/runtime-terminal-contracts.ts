@@ -10,6 +10,7 @@ import type { TabGroupLayoutNode } from './tab-types'
 import type { TerminalExitCause } from './terminal-exit-cause'
 import type { TerminalPaneLayoutNode } from './terminal-tab-types'
 import type { TuiAgent } from './tui-agent'
+import type { PaneAgentIdentityAvailabilitySnapshot } from './pane-agent-identity-availability'
 
 export type RuntimeTerminalSummary = {
   handle: string
@@ -93,6 +94,8 @@ export type RuntimeTerminalListResult = {
   truncated: boolean
   /** Absent from hosts that predate the field; treat that scope as unverifiable. */
   hostScope?: RuntimeTerminalListHostScope
+  /** Optional cumulative, privacy-reduced pane identity census from the authority. */
+  agentIdentityAvailability?: PaneAgentIdentityAvailabilitySnapshot
 }
 
 export type RuntimeTerminalOrphanAdoptionClaim = {

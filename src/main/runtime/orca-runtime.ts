@@ -344,7 +344,6 @@ import type {
   TerminalPaneLayoutNode,
   TerminalTab
 } from '../../shared/terminal-tab-types'
-import type { TuiAgent } from '../../shared/tui-agent'
 import type { BranchPrefixStrategy } from '../../shared/ui-chrome-types'
 import type { WorkspaceSessionState } from '../../shared/workspace-session-state-types'
 import type { WorkspaceSource as WorkspaceCreateTelemetrySource } from '../../shared/workspace-source'
@@ -449,6 +448,19 @@ import type {
   LinearStatusSetResult
 } from '../../shared/linear/agent-access'
 import { runtimeTerminalDegradation } from './native-terminal-availability'
+import {
+  MAX_PENDING_IDENTITY_OBSERVATIONS,
+  TITLE_CANDIDATE_WINDOW_MS
+} from '../../shared/pane-agent-identity-availability'
+import type {
+  PaneAgentIdentityAvailability,
+  PaneAgentIdentityHostKind
+} from '../../shared/pane-agent-identity-evidence'
+import { ManualAgentCommandTracker } from '../../shared/manual-agent-command-tracker'
+import { resolveExplicitTerminalTitleAgentType } from '../../shared/terminal-title-agent-type'
+import type { TuiAgent } from '../../shared/tui-agent'
+import { PaneAgentIdentityCensus } from '../telemetry/pane-agent-identity-census'
+import { PaneAgentIdentityObservationAuthority } from './pane-agent-identity-observation-authority'
 import {
   BROWSER_UNAVAILABLE_ERROR_CODE,
   browserUnavailableMessage,
@@ -3130,6 +3142,21 @@ type ProviderSnapshotReadOptions = {
 
 export class OrcaRuntimeService {
   private readonly runtimeId = randomUUID()
+  private readonly paneAgentIdentityCensus: PaneAgentIdentityCensus
+  private readonly paneAgentIdentityObservations: PaneAgentIdentityObservationAuthority
+  private readonly paneAgentCommandTrackers = new Map<string, ManualAgentCommandTracker>()
+  private readonly paneAgentIdentityOwnedIncarnations = new Map<string, PtyIncarnationId | null>()
+  private readonly paneAgentIdentityLiveHookObservedAtByPty = new Map<string, number>()
+  private readonly sshTypedAgentCandidates = new Map<
+    string,
+    {
+      agent: TuiAgent
+      incarnationId: PtyIncarnationId | null
+      lifecycleGeneration: number
+      commandOrdinal: number
+      timer: ReturnType<typeof setTimeout>
+    }
+  >()
   private readonly startedAt = Date.now()
   private readonly store: RuntimeStore | null
   private managedHookReconciliationGeneration = 0
@@ -3874,9 +3901,16 @@ export class OrcaRuntimeService {
       agentSessionClaimSigner?: AgentSessionClaimSigner
       orchestrationEnvironmentTransport?: OrchestrationEnvironmentTransport
       skillTransactionRecovery?: Promise<unknown>
+      paneAgentIdentityCensus?: PaneAgentIdentityCensus
     }
   ) {
     this.store = store
+    this.paneAgentIdentityCensus =
+      deps?.paneAgentIdentityCensus ?? new PaneAgentIdentityCensus({ emit: null })
+    this.paneAgentIdentityObservations = new PaneAgentIdentityObservationAuthority(
+      this.runtimeId,
+      this.paneAgentIdentityCensus
+    )
     // Why: per-device tab selections must survive host restarts, or every phone snaps back to the first tab on return.
     const persistedClientTabSelections = store?.getMobileClientTabSelections?.()
     if (persistedClientTabSelections) {
@@ -11442,7 +11476,11 @@ export class OrcaRuntimeService {
       tabId: string
       leafId: string
       incarnationId?: PtyIncarnationId
-      agentLaunchAuthority?: { launchToken: string; launchAgent: TuiAgent }
+      agentLaunchAuthority?: {
+        launchToken: string
+        launchAgent: TuiAgent
+        launchMode?: 'orca-launch' | 'resume'
+      }
     },
     isWsl?: boolean
   ): void {
@@ -11480,6 +11518,11 @@ export class OrcaRuntimeService {
       pty.launchToken = agentLaunchAuthority.launchToken
       pty.launchIncarnationId = binding.incarnationId
       pty.launchAgent = agentLaunchAuthority.launchAgent
+      this.observePtyAgentLaunch(
+        pty,
+        agentLaunchAuthority.launchMode ?? 'orca-launch',
+        agentLaunchAuthority.launchToken
+      )
     }
     const pendingIncarnation = this.pendingPtyRegistrationIncarnations.get(ptyId)
     if (
@@ -12452,6 +12495,13 @@ export class OrcaRuntimeService {
       pty.lastOscTitleEpochMs = observedAtEpochMs
       pty.lastAgentStatus = agentStatus
       pty.lastAgentStatusObservedLive = true
+      const titleAgent = resolveExplicitTerminalTitleAgentType(rawTitle)
+      if (titleAgent) {
+        this.paneAgentIdentityObservations.observeTitle(
+          this.getPaneAgentIdentityPtyContext(pty),
+          titleAgent
+        )
+      }
       if (prevStatus !== agentStatus) {
         pty.lastAgentStatusStartedAtEpochMs = observedAtEpochMs
       }
@@ -12551,7 +12601,13 @@ export class OrcaRuntimeService {
   private resetTrackedTerminalStateForProviderGeneration(ptyId: string): void {
     // Why: a replacement daemon session can reuse the PTY id, but title/parser
     // state from the prior process must not bleed into its snapshots or chunks.
+    const previousPty = this.ptysById.get(ptyId)
+    this.releasePaneAgentIdentityOwner(ptyId, previousPty?.incarnationId)
+    this.paneAgentIdentityObservations.exitOrRebind(ptyId, previousPty?.incarnationId)
     this.disposePtyTitleTracker(ptyId)
+    this.paneAgentCommandTrackers.delete(ptyId)
+    this.paneAgentIdentityLiveHookObservedAtByPty.delete(ptyId)
+    this.clearSshTypedAgentCandidate(ptyId)
     this.oscTitleScanTailByPtyId.delete(ptyId)
     this.osc7ScanTailByPtyId.delete(ptyId)
     this.agentStatusOscProcessorsByPtyId.delete(ptyId)
@@ -12721,6 +12777,19 @@ export class OrcaRuntimeService {
     }
     let retainedChanged = false
     for (const payload of chunk.payloads) {
+      if (pty && isTuiAgent(payload.agentType)) {
+        this.rememberPaneAgentIdentityHookSurface(ptyId, payload.state)
+        if (connectionId && payload.state !== 'done') {
+          this.corroborateSshTypedAgent(ptyId, payload.agentType, 'live-hook')
+        }
+        this.paneAgentIdentityObservations.observeEvidence(
+          this.getPaneAgentIdentityPtyContext(pty),
+          {
+            source: payload.state === 'done' ? 'completed-hook' : 'live-hook',
+            agent: payload.agentType
+          }
+        )
+      }
       this.recordAgentPromptLifecycleState(
         ptyId,
         mapExplicitAgentStateToRuntimeTerminalStatus(payload.state)
@@ -14662,6 +14731,8 @@ export class OrcaRuntimeService {
 
   private retirePtyAgentLaunchAuthority(ptyId: string): void {
     const pty = this.ptysById.get(ptyId)
+    this.releasePaneAgentIdentityOwner(ptyId, pty?.incarnationId)
+    this.paneAgentIdentityLiveHookObservedAtByPty.delete(ptyId)
     if (!pty) {
       return
     }
@@ -15924,6 +15995,8 @@ export class OrcaRuntimeService {
     if (exitIncarnationId && pty?.incarnationId && exitIncarnationId !== pty.incarnationId) {
       return
     }
+    this.paneAgentCommandTrackers.delete(ptyId)
+    this.clearSshTypedAgentCandidate(ptyId)
     // Why intent first: a requested stop can still be delivered by the provider's
     // own exit event, whose status looks exactly like a natural finish.
     //
@@ -15944,6 +16017,10 @@ export class OrcaRuntimeService {
       pty?.connectionId != null &&
       exitCode < 0 &&
       options?.hostExitConfirmed !== true
+    if (!preservesAbnormalSshSurface && pty) {
+      this.paneAgentIdentityLiveHookObservedAtByPty.delete(ptyId)
+      this.paneAgentIdentityObservations.exitOrRebind(ptyId, pty.incarnationId)
+    }
     // Why: collect before retirePtyAgentLaunchAuthority, which deletes the restored-authority
     // receipt a receipt-only pane's key comes from.
     const exitPaneKeys = this.collectPaneKeysForPty(ptyId)
@@ -18022,6 +18099,7 @@ export class OrcaRuntimeService {
 
     return {
       terminals: listedTerminals,
+      agentIdentityAvailability: this.paneAgentIdentityCensus.snapshot(),
       hostScope: this.buildTerminalListHostScope(
         targetWorktreeId,
         matchingTerminals,
@@ -18037,6 +18115,269 @@ export class OrcaRuntimeService {
       ),
       totalCount: matchingTerminals.length,
       truncated: matchingTerminals.length > limit
+    }
+  }
+
+  recordPaneAgentIdentityAvailability(observation: PaneAgentIdentityAvailability): void {
+    this.paneAgentIdentityCensus.record(observation)
+  }
+
+  getPaneAgentIdentityCensus(): PaneAgentIdentityCensus {
+    return this.paneAgentIdentityCensus
+  }
+
+  private getPaneAgentIdentityPtyContext(pty: RuntimePtyWorktreeRecord): {
+    ptyId: string
+    incarnationId: PtyIncarnationId | null
+    hostKinds: readonly PaneAgentIdentityHostKind[]
+  } {
+    const hostKinds: readonly PaneAgentIdentityHostKind[] = pty.connectionId
+      ? ['ssh']
+      : pty.isWsl || pty.wslDistro || this.wslDistroByPtyId.has(pty.ptyId)
+        ? ['wsl-host', 'wsl-distro']
+        : ['native']
+    return {
+      ptyId: pty.ptyId,
+      incarnationId: pty.incarnationId,
+      hostKinds: this.paneAgentIdentityCensus.hostKindsForObservation(hostKinds)
+    }
+  }
+
+  private observePtyAgentLaunch(
+    pty: RuntimePtyWorktreeRecord,
+    launchMode: 'orca-launch' | 'resume',
+    attestationId: string
+  ): void {
+    if (!pty.launchAgent) {
+      return
+    }
+    if (
+      this.paneAgentIdentityObservations.attestRun(
+        this.getPaneAgentIdentityPtyContext(pty),
+        launchMode,
+        pty.launchAgent,
+        `${launchMode}:${attestationId}`
+      )
+    ) {
+      this.paneAgentIdentityOwnedIncarnations.set(pty.ptyId, pty.incarnationId)
+    }
+  }
+
+  private releasePaneAgentIdentityOwner(
+    ptyId: string,
+    incarnationId?: PtyIncarnationId | null
+  ): void {
+    if (
+      !this.paneAgentIdentityOwnedIncarnations.has(ptyId) ||
+      (incarnationId !== undefined &&
+        this.paneAgentIdentityOwnedIncarnations.get(ptyId) !== incarnationId)
+    ) {
+      return
+    }
+    this.paneAgentIdentityOwnedIncarnations.delete(ptyId)
+    this.paneAgentCommandTrackers.get(ptyId)?.reset()
+  }
+
+  observeAgentHookStatus(args: {
+    paneKey: string
+    connectionId?: string | null
+    isReplay?: boolean
+    restoredUnconfirmed?: boolean
+    providerSessionOnly?: boolean
+    payload: { state: string; agentType?: string }
+  }): boolean {
+    if (
+      args.isReplay === true ||
+      args.restoredUnconfirmed === true ||
+      args.providerSessionOnly === true ||
+      !isTuiAgent(args.payload.agentType)
+    ) {
+      return false
+    }
+    const pty = this.getPtyRecordForPaneKey(args.paneKey)
+    const isWslRelay = isWslHookRelayConnectionId(args.connectionId)
+    const hookOwnerConnectionId = isWslRelay ? null : (args.connectionId ?? null)
+    const isWslPty =
+      pty?.isWsl === true ||
+      !!pty?.wslDistro ||
+      (pty ? this.wslDistroByPtyId.has(pty.ptyId) : false)
+    if (
+      !pty?.connected ||
+      (pty.connectionId ?? null) !== hookOwnerConnectionId ||
+      (isWslRelay && !isWslPty)
+    ) {
+      return false
+    }
+    if (pty.connectionId && args.payload.state !== 'done') {
+      this.corroborateSshTypedAgent(pty.ptyId, args.payload.agentType, 'live-hook')
+    }
+    this.rememberPaneAgentIdentityHookSurface(pty.ptyId, args.payload.state)
+    return this.paneAgentIdentityObservations.observeEvidence(
+      this.getPaneAgentIdentityPtyContext(pty),
+      {
+        source: args.payload.state === 'done' ? 'completed-hook' : 'live-hook',
+        agent: args.payload.agentType
+      }
+    )
+  }
+
+  observeAcceptedPtyWrite(ptyId: string, data: string): void {
+    const pty = this.ptysById.get(ptyId)
+    if (!pty?.connected) {
+      return
+    }
+    if (this.paneAgentIdentityOwnedIncarnations.get(ptyId) === pty.incarnationId) {
+      this.paneAgentCommandTrackers.get(ptyId)?.reset()
+      return
+    }
+    if (this.hasFreshPaneAgentIdentitySurface(pty)) {
+      this.paneAgentCommandTrackers.get(ptyId)?.reset()
+      return
+    }
+    const tracker = this.paneAgentCommandTrackers.get(ptyId) ?? new ManualAgentCommandTracker()
+    this.paneAgentCommandTrackers.set(ptyId, tracker)
+    const [agent] = tracker.ingest(data)
+    if (!agent) {
+      return
+    }
+    if (pty.connectionId) {
+      this.rememberSshTypedAgentCandidate(ptyId, agent, pty, tracker.acceptedCommandCount)
+      return
+    }
+    const context = this.getPaneAgentIdentityPtyContext(pty)
+    if (
+      this.paneAgentIdentityObservations.attestRun(
+        context,
+        'typed',
+        agent,
+        `typed:${this.getPtyLifecycleGeneration(ptyId)}:${tracker.acceptedCommandCount}`
+      )
+    ) {
+      this.paneAgentIdentityOwnedIncarnations.set(ptyId, pty.incarnationId)
+    }
+  }
+
+  private rememberSshTypedAgentCandidate(
+    ptyId: string,
+    agent: TuiAgent,
+    pty: RuntimePtyWorktreeRecord,
+    commandOrdinal: number
+  ): void {
+    const previous = this.sshTypedAgentCandidates.get(ptyId)
+    if (!previous && this.sshTypedAgentCandidates.size >= MAX_PENDING_IDENTITY_OBSERVATIONS) {
+      this.paneAgentIdentityCensus.addCoverage('ssh', 'overflow')
+      return
+    }
+    if (previous) {
+      clearTimeout(previous.timer)
+    }
+    const timer = setTimeout(
+      () => this.clearSshTypedAgentCandidate(ptyId),
+      TITLE_CANDIDATE_WINDOW_MS
+    )
+    timer.unref?.()
+    this.sshTypedAgentCandidates.set(ptyId, {
+      agent,
+      incarnationId: pty.incarnationId,
+      lifecycleGeneration: this.getPtyLifecycleGeneration(ptyId),
+      commandOrdinal,
+      timer
+    })
+  }
+
+  private rememberPaneAgentIdentityHookSurface(ptyId: string, state: string): void {
+    if (state === 'done') {
+      this.paneAgentIdentityLiveHookObservedAtByPty.delete(ptyId)
+      return
+    }
+    this.paneAgentIdentityLiveHookObservedAtByPty.set(ptyId, Date.now())
+  }
+
+  private hasFreshPaneAgentIdentitySurface(pty: RuntimePtyWorktreeRecord): boolean {
+    if (pty.foregroundAgent || (pty.lastAgentStatusObservedLive && pty.lastAgentStatus !== null)) {
+      return true
+    }
+    const hookObservedAt = this.paneAgentIdentityLiveHookObservedAtByPty.get(pty.ptyId)
+    if (hookObservedAt === undefined) {
+      return false
+    }
+    if (Date.now() - hookObservedAt <= AGENT_STATUS_STALE_AFTER_MS) {
+      return true
+    }
+    this.paneAgentIdentityLiveHookObservedAtByPty.delete(pty.ptyId)
+    return false
+  }
+
+  private clearSshTypedAgentCandidate(ptyId: string): void {
+    const candidate = this.sshTypedAgentCandidates.get(ptyId)
+    if (candidate) {
+      clearTimeout(candidate.timer)
+    }
+    this.sshTypedAgentCandidates.delete(ptyId)
+  }
+
+  corroborateSshTypedAgent(
+    ptyId: string,
+    targetAgent: TuiAgent,
+    source: 'process' | 'live-hook' = 'process'
+  ): boolean {
+    const candidate = this.sshTypedAgentCandidates.get(ptyId)
+    const pty = this.ptysById.get(ptyId)
+    if (
+      candidate?.agent !== targetAgent ||
+      !pty?.connected ||
+      !pty.connectionId ||
+      candidate.incarnationId !== pty.incarnationId ||
+      candidate.lifecycleGeneration !== this.getPtyLifecycleGeneration(ptyId)
+    ) {
+      return false
+    }
+    this.clearSshTypedAgentCandidate(ptyId)
+    const context = this.getPaneAgentIdentityPtyContext(pty)
+    if (
+      !this.paneAgentIdentityObservations.attestRun(
+        context,
+        'typed',
+        targetAgent,
+        `typed:${candidate.lifecycleGeneration}:${candidate.commandOrdinal}`
+      )
+    ) {
+      return false
+    }
+    this.paneAgentIdentityOwnedIncarnations.set(ptyId, pty.incarnationId)
+    if (source === 'process') {
+      this.paneAgentIdentityObservations.observeEvidence(context, {
+        source,
+        agent: targetAgent,
+        processProvenance: 'target-origin'
+      })
+    } else {
+      this.paneAgentIdentityObservations.observeEvidence(context, {
+        source,
+        agent: targetAgent
+      })
+    }
+    return true
+  }
+
+  shutdownPaneAgentIdentityCensus(emitTelemetry = true): void {
+    if (this.sshTypedAgentCandidates.size > 0) {
+      this.paneAgentIdentityCensus.addCoverage(
+        'ssh',
+        'truncated',
+        this.sshTypedAgentCandidates.size
+      )
+    }
+    this.paneAgentIdentityObservations.shutdown()
+    if (emitTelemetry) {
+      this.paneAgentIdentityCensus.flush()
+    }
+    this.paneAgentIdentityCensus.shutdown()
+    this.paneAgentCommandTrackers.clear()
+    this.paneAgentIdentityOwnedIncarnations.clear()
+    this.paneAgentIdentityLiveHookObservedAtByPty.clear()
+    for (const ptyId of this.sshTypedAgentCandidates.keys()) {
+      this.clearSshTypedAgentCandidate(ptyId)
     }
   }
 
@@ -19362,6 +19703,7 @@ export class OrcaRuntimeService {
       }
       await assertTerminalInputWithinLimitWithYield(action.text)
       await this.writeTerminalAction(pty.pty.ptyId, action, payload, options)
+      this.observeAcceptedPtyWrite(pty.pty.ptyId, payload)
       return {
         handle,
         accepted: true,
@@ -19387,6 +19729,7 @@ export class OrcaRuntimeService {
     }
 
     await this.writeTerminalAction(leaf.ptyId, action, payload, options)
+    this.observeAcceptedPtyWrite(leaf.ptyId, payload)
 
     return {
       handle,
@@ -19861,6 +20204,7 @@ export class OrcaRuntimeService {
         }
         return
       }
+      this.releasePaneAgentIdentityOwner(ptyId, current.incarnationId)
       this.recordTerminalSideEffectFact(ptyId, { kind: 'agent-exited' })
     })
   }
@@ -19984,8 +20328,23 @@ export class OrcaRuntimeService {
     const foregroundAgent = foregroundProcess
       ? (recognizeAgentProcess(foregroundProcess)?.agent ?? null)
       : null
+    const isWsl = pty.isWsl || pty.wslDistro || this.wslDistroByPtyId.has(ptyId)
+    if (foregroundAgent && !isWsl) {
+      const processProvenance = pty.connectionId ? 'target-origin' : 'execution-host'
+      this.paneAgentIdentityObservations.observeEvidence(this.getPaneAgentIdentityPtyContext(pty), {
+        source: 'process',
+        agent: foregroundAgent,
+        processProvenance
+      })
+      if (pty.connectionId) {
+        this.corroborateSshTypedAgent(ptyId, foregroundAgent, 'process')
+      }
+    }
     if (pty.foregroundAgent === foregroundAgent) {
       return false
+    }
+    if (pty.foregroundAgent && !foregroundAgent) {
+      this.releasePaneAgentIdentityOwner(ptyId, pty.incarnationId)
     }
     pty.foregroundAgent = foregroundAgent
     this.touchMobileSessionSnapshotsForPty(ptyId)
@@ -29183,6 +29542,15 @@ export class OrcaRuntimeService {
             pty.launchToken = launchToken ?? null
             pty.launchIncarnationId = launchToken ? pty.incarnationId : null
             pty.launchAgent = launchOpts.launchAgent ?? null
+            if (pty.launchAgent && launchToken) {
+              this.observePtyAgentLaunch(
+                pty,
+                launchOpts.resumeProviderSession || launchOpts.agentSessionClaim
+                  ? 'resume'
+                  : 'orca-launch',
+                launchToken
+              )
+            }
           }
           pty.tabId = tabId
           pty.paneKey = paneKey
@@ -33349,6 +33717,11 @@ export class OrcaRuntimeService {
     pty.worktreeId = worktreeId
     if (state.incarnationId !== undefined) {
       if (pty.incarnationId && state.incarnationId && pty.incarnationId !== state.incarnationId) {
+        this.releasePaneAgentIdentityOwner(ptyId, pty.incarnationId)
+        this.paneAgentCommandTrackers.delete(ptyId)
+        this.paneAgentIdentityLiveHookObservedAtByPty.delete(ptyId)
+        this.clearSshTypedAgentCandidate(ptyId)
+        this.paneAgentIdentityObservations.exitOrRebind(ptyId, pty.incarnationId)
         this.invalidatePtyIncarnationHandle(ptyId)
       }
       pty.incarnationId = state.incarnationId
@@ -33839,7 +34212,13 @@ export class OrcaRuntimeService {
 
   private dropDisconnectedPtyRecord(ptyId: string): void {
     // Why: pruning can remove a PTY without the normal exit callback.
+    const pty = this.ptysById.get(ptyId)
+    this.releasePaneAgentIdentityOwner(ptyId, pty?.incarnationId)
+    this.paneAgentIdentityObservations.exitOrRebind(ptyId, pty?.incarnationId)
     this.advancePtyLifecycleGeneration(ptyId)
+    this.paneAgentCommandTrackers.delete(ptyId)
+    this.paneAgentIdentityLiveHookObservedAtByPty.delete(ptyId)
+    this.clearSshTypedAgentCandidate(ptyId)
     this.pairedRendererSessionOwnedPtyIds.delete(ptyId)
     this.ptysById.delete(ptyId)
     this.recentPtyOutputById.delete(ptyId)

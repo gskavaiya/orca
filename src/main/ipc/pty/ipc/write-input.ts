@@ -163,7 +163,19 @@ export function createPtyWriteInput(deps: {
       if (visibleRendererPtys.has(args.id)) {
         clearHiddenRendererResizeOutput(args.id)
       }
-      return writePtyProviderInput(provider, args.id, args.data)
+      const result = writePtyProviderInput(provider, args.id, args.data)
+      if (typeof result === 'boolean') {
+        if (result) {
+          runtime?.observeAcceptedPtyWrite?.(args.id, args.data)
+        }
+        return result
+      }
+      return result.then((accepted) => {
+        if (accepted) {
+          runtime?.observeAcceptedPtyWrite?.(args.id, args.data)
+        }
+        return accepted
+      })
     } catch {
       return false
     }
@@ -188,7 +200,19 @@ export function createPtyWriteInput(deps: {
       if (visibleRendererPtys.has(args.id)) {
         clearHiddenRendererResizeOutput(args.id)
       }
-      return writePtyProviderInput(provider, args.id, args.data)
+      const result = writePtyProviderInput(provider, args.id, args.data)
+      if (typeof result === 'boolean') {
+        if (result) {
+          runtime?.observeAcceptedPtyWrite?.(args.id, args.data)
+        }
+        return result
+      }
+      return result.then((accepted) => {
+        if (accepted) {
+          runtime?.observeAcceptedPtyWrite?.(args.id, args.data)
+        }
+        return accepted
+      })
     } catch {
       return false
     }

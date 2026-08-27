@@ -177,6 +177,27 @@ describe('sendTerminal absence gate for leaf-branch writes', () => {
     expect(write).toHaveBeenCalledWith(STALE_PTY_ID, 'ping')
   })
 
+  it('observes a recognized terminal.send command only after its accepted provider write', async () => {
+    vi.useFakeTimers()
+    try {
+      const { runtime, handle } = await makeRuntimeWithLeafHandle({
+        hasPty: (ptyId) => ptyId === STALE_PTY_ID
+      })
+
+      const send = runtime.sendTerminal(handle, { text: 'codex', enter: true })
+      await vi.advanceTimersByTimeAsync(500)
+      await send
+      vi.advanceTimersByTime(5_000)
+
+      expect((await runtime.listTerminals()).agentIdentityAvailability?.rows).toEqual([
+        ['native', 'typed', 1, 0, 0, 0, 0]
+      ])
+      runtime.shutdownPaneAgentIdentityCensus(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('reuses a proven-absent verdict across repeated sends instead of re-probing', async () => {
     const probe = vi.fn(async () => false)
     const { runtime, handle } = await makeRuntimeWithLeafHandle({ probePtyLiveness: probe })

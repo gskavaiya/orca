@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
-import { subscribeRuntimeEnvironmentFromPreload } from './runtime-environment-subscriptions'
+import {
+  observeRuntimeEnvironmentTerminalListResponse,
+  subscribeRuntimeEnvironmentFromPreload
+} from './runtime-environment-subscriptions'
 
 function deferred<T>(): {
   promise: Promise<T>
@@ -55,6 +58,96 @@ function dispatch(ipc: ReturnType<typeof createIpc>, event: SubscriptionEvent): 
 }
 
 describe('subscribeRuntimeEnvironmentFromPreload', () => {
+  it('observes one-shot terminal lists at the preload boundary and skips old peers', () => {
+    const ipc = createIpc()
+    const snapshot = { epoch: 'epoch', revision: 1, rows: [] }
+
+    observeRuntimeEnvironmentTerminalListResponse(
+      ipc,
+      { selector: 'desk', method: 'terminal.list' },
+      {
+        id: 'rpc-list',
+        ok: true,
+        result: { terminals: [], agentIdentityAvailability: snapshot },
+        _meta: { runtimeId: 'rt' }
+      }
+    )
+
+    expect(ipc.invoke).toHaveBeenCalledWith('telemetry:ingestPaneAgentIdentityAvailability', {
+      environmentKey: 'desk',
+      snapshot
+    })
+
+    ipc.invoke.mockClear()
+    observeRuntimeEnvironmentTerminalListResponse(
+      ipc,
+      { selector: 'desk', method: 'terminal.list' },
+      {
+        id: 'rpc-old-peer',
+        ok: true,
+        result: { terminals: [] },
+        _meta: { runtimeId: 'rt' }
+      }
+    )
+    observeRuntimeEnvironmentTerminalListResponse(
+      ipc,
+      { selector: 'desk', method: 'terminal.show' },
+      {
+        id: 'rpc-other',
+        ok: true,
+        result: { agentIdentityAvailability: snapshot },
+        _meta: { runtimeId: 'rt' }
+      }
+    )
+    observeRuntimeEnvironmentTerminalListResponse(
+      ipc,
+      { selector: 'desk', method: 'terminal.list' },
+      {
+        id: 'rpc-private-extra',
+        ok: true,
+        result: { agentIdentityAvailability: { ...snapshot, rawTitle: 'private' } },
+        _meta: { runtimeId: 'rt' }
+      }
+    )
+    expect(ipc.invoke).not.toHaveBeenCalled()
+  })
+
+  it('observes each successful terminal-list subscription response once', async () => {
+    const ipc = createIpc()
+    ipc.invoke.mockImplementation((channel: string) =>
+      channel === 'runtimeEnvironments:subscribe'
+        ? Promise.resolve({ subscriptionId: 'sub-list', requestId: 'rpc-list' })
+        : (Promise.resolve({}) as Promise<unknown>)
+    )
+    const onResponse = vi.fn()
+    const cleanup = await subscribeRuntimeEnvironmentFromPreload(
+      ipc,
+      { selector: 'desk', method: 'terminal.list' },
+      { onResponse },
+      () => 'sub-list'
+    )
+    const snapshot = { epoch: 'epoch', revision: 1, rows: [] }
+
+    dispatch(ipc, {
+      subscriptionId: 'sub-list',
+      type: 'response',
+      response: {
+        id: 'rpc-list',
+        ok: true,
+        result: { terminals: [], agentIdentityAvailability: snapshot },
+        _meta: { runtimeId: 'rt' }
+      }
+    })
+
+    expect(onResponse).toHaveBeenCalledTimes(1)
+    expect(ipc.invoke).toHaveBeenCalledTimes(2)
+    expect(ipc.invoke).toHaveBeenLastCalledWith('telemetry:ingestPaneAgentIdentityAvailability', {
+      environmentKey: 'desk',
+      snapshot
+    })
+    cleanup.unsubscribe()
+  })
+
   it('registers the subscription event listener before invoking main', async () => {
     const subscription = deferred<{ subscriptionId: string; requestId: string }>()
     const ipc = createIpc()
