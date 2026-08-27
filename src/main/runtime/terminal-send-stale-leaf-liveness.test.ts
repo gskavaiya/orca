@@ -186,8 +186,10 @@ describe('sendTerminal absence gate for leaf-branch writes', () => {
     expect(write).toHaveBeenCalledWith(STALE_PTY_ID, 'codex\r')
 
     runtime.onPtyExit(STALE_PTY_ID, 0)
+    // A typed pane without a launch or hook has no evidence: pin noEvidence and null identity.
+    // The old zeros relied on a fabricated launch fact.
     expect((await runtime.listTerminals()).agentIdentityAvailability?.rows).toEqual([
-      ['native', 'typed', 1, 0, 0, 0, 0]
+      ['native', 'typed', 1, 1, 0, 1, 0]
     ])
     runtime.shutdownPaneAgentIdentityCensus(false)
   })
